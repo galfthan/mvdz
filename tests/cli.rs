@@ -100,9 +100,9 @@ fn non_demos_are_refused() {
     }
     let left: Vec<_> = std::fs::read_dir(&d).unwrap().collect();
     assert_eq!(left.len(), cases.len(), "temporary files left");
-    // --force stores a non-demo anyway, and it round-trips
+    // --allow-non-demo stores a non-demo anyway, and it round-trips
     let (i, o) = (d.join("tiff.mvd"), d.join("forced.mvdz"));
-    let r = run(&[Path::new("compress"), Path::new("--force"), &i, &o]);
+    let r = run(&[Path::new("compress"), Path::new("--allow-non-demo"), &i, &o]);
     assert!(r.status.success(), "{r:?}");
     assert_eq!(
         mvdz::decompress(&std::fs::read(&o).unwrap(), 1).unwrap(),
@@ -265,5 +265,81 @@ fn closed_stdout_is_quiet() {
         assert!(r.status.success(), "{:?}: {:?} {err}", args[0], r.status);
         assert!(err.is_empty(), "{:?}: {err}", args[0]);
     }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// compress and decompress name each output after its input, keep the
+/// inputs, refuse to overwrite without -f, report a bad file and go on.
+#[test]
+fn outputs_named_after_inputs() {
+    let d = tmp("names");
+    let raw = demo("duel.normal.mvdz");
+    let (a, b) = (d.join("a.mvd"), d.join("b.MVD.gz"));
+    std::fs::write(&a, &raw).unwrap();
+    std::fs::write(&b, gzip(&raw)).unwrap();
+    let r = run(&[
+        Path::new("compress"),
+        Path::new("-j"),
+        Path::new("2"),
+        &a,
+        &b,
+    ]);
+    assert!(r.status.success(), "{r:?}");
+    let (az, bz) = (d.join("a.mvdz"), d.join("b.mvdz"));
+    assert_eq!(std::fs::read(&az).unwrap(), std::fs::read(&bz).unwrap());
+    assert!(a.exists() && b.exists(), "inputs are kept");
+
+    // a.mvd exists: refused without -f, the other file still written
+    let r = run(&[Path::new("decompress"), &az, &bz]);
+    assert_eq!(r.status.code(), Some(1), "{r:?}");
+    assert!(String::from_utf8_lossy(&r.stderr).contains("exists (-f overwrites)"));
+    assert_eq!(std::fs::read(d.join("b.mvd")).unwrap(), raw);
+    std::fs::write(&a, b"old").unwrap();
+    let r = run(&[Path::new("decompress"), Path::new("-f"), &az]);
+    assert!(r.status.success(), "{r:?}");
+    assert_eq!(std::fs::read(&a).unwrap(), raw);
+
+    // --gzip names the output .mvd.gz; --rm deletes the input once written
+    let r = run(&[
+        Path::new("decompress"),
+        Path::new("--gzip"),
+        Path::new("--rm"),
+        &bz,
+    ]);
+    assert!(r.status.success(), "{r:?}");
+    let back = std::fs::read(d.join("b.mvd.gz")).unwrap();
+    assert_eq!(mvdz::gunzip(&back, 1 << 30).unwrap(), raw);
+    assert!(!bz.exists(), "--rm deleted the input");
+
+    // -o names the output; the two-name form still works
+    let o = d.join("x.bin");
+    assert!(
+        run(&[Path::new("compress"), Path::new("-o"), &o, &a])
+            .status
+            .success()
+    );
+    let o2 = d.join("y.mvdz");
+    assert!(run(&[Path::new("compress"), &a, &o2]).status.success());
+    assert_eq!(std::fs::read(&o).unwrap(), std::fs::read(&o2).unwrap());
+    // existing outputs need -f in that form too
+    let r = run(&[Path::new("compress"), &a, &o2]);
+    assert_eq!(r.status.code(), Some(1), "{r:?}");
+    assert!(
+        run(&[Path::new("compress"), Path::new("-f"), &a, &o2])
+            .status
+            .success()
+    );
+
+    // a name decompress cannot derive from, and two inputs with one output
+    let r = run(&[Path::new("decompress"), &o, &az]);
+    assert_eq!(r.status.code(), Some(1), "{r:?}");
+    assert!(String::from_utf8_lossy(&r.stderr).contains("not named *.mvdz"));
+    let c = d.join("a.mvd.gz");
+    std::fs::write(&c, gzip(&raw)).unwrap();
+    std::fs::remove_file(&az).unwrap();
+    let r = run(&[Path::new("compress"), &a, &c]);
+    assert_eq!(r.status.code(), Some(1), "{r:?}");
+    assert!(String::from_utf8_lossy(&r.stderr).contains("is also the output of"));
+    assert!(az.exists(), "the first of the two was written");
     let _ = std::fs::remove_dir_all(&d);
 }

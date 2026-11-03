@@ -28,9 +28,9 @@ jobs:
       - name: Smoke test
         run: |
           for bin in target/$TARGET/release/mvdz target-v3/$TARGET/release/mvdz; do
-            "$bin" decompress tests/vectors/duel.normal.mvdz demo.mvd
-            "$bin" compress demo.mvd demo.mvdz
-            "$bin" decompress --trusted demo.mvdz back.mvd
+            "$bin" decompress -f tests/vectors/duel.normal.mvdz demo.mvd
+            "$bin" compress -f demo.mvd
+            "$bin" decompress -f --trusted demo.mvdz back.mvd
             cmp demo.mvd back.mvd
             sha256sum demo.mvd | grep -q "$(grep '^duel.normal.mvdz' tests/vectors/MANIFEST.tsv | cut -f2)"
             "$bin" info demo.mvdz > /dev/null

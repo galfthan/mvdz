@@ -69,9 +69,10 @@ normal level; [BENCHMARKS.md](BENCHMARKS.md)).
 ## Quickstart
 
 ```
-mvdz compress game.mvd.gz game.mvdz          # normal level, one segment (.mvd or .mvd.gz)
-mvdz compress --fast -s 1M game.mvd game.mvdz  # faster decode, seekable segments
-mvdz decompress game.mvdz game.mvd
+mvdz compress game.mvd.gz                    # -> game.mvdz (normal level, one segment)
+mvdz compress *.mvd.gz                       # every file, several at once
+mvdz compress --fast -s 1M game.mvd          # faster decode, seekable segments
+mvdz decompress game.mvdz                    # -> game.mvd (--gzip: game.mvd.gz)
 mvdz info game.mvdz | jq .sha256             # metadata, without decoding
 ```
 
@@ -132,8 +133,10 @@ including a check that the output decodes to the input.
 ## Command line
 
 ```
-mvdz compress   [--fast] [-s size] [-j threads] [--ext key=value]... [--force] in.mvd out.mvdz
-mvdz decompress [-j threads] [--max-memory size] [--trusted] [--gzip | --no-gzip] in.mvdz out.mvd
+mvdz compress   [--fast] [-s size] [-j threads] [--ext key=value]... [--allow-non-demo]
+                [-f] [--rm] files... | in out.mvdz | -o out.mvdz in
+mvdz decompress [-j threads] [--max-memory size] [--trusted] [--gzip | --no-gzip]
+                [-f] [--rm] files... | in.mvdz out | -o out in.mvdz
 mvdz info       file.mvdz...                 metadata, index, attachments as JSON
 mvdz census     [--tsv] files-or-dirs...     census of .mvdz / .mvd / .mvd.gz files
 mvdz attach add file.mvdz name path [--mime type] [--meta key=value]...
@@ -144,8 +147,17 @@ mvdz attach export in.mvdz out.mvdz [--keep name]... [--keep-prefix p]... [--dro
 mvdz bench      [--levels normal,fast] [-s size] [-r reps] [-j threads] [--trusted] files...
 ```
 
-`-` is standard input or output (`mvdz decompress game.mvdz - | ...`).
-Sizes take K, M, G suffixes (binary). `-s 1M` cuts the demo into
+`compress` and `decompress` work like zstd: each output is named after its
+input and written beside it (`game.mvd` or `game.mvd.gz` gives `game.mvdz`;
+`game.mvdz` gives `game.mvd`, or `game.mvd.gz` with `--gzip`). Inputs are
+kept; `--rm` deletes each one after its output is written. An existing
+output is not overwritten without `-f`. With several files, `-j` of them
+run at once (one thread each), a file that fails is reported and the rest
+go on, and the exit status is 1 if any failed. Two names where the second
+is an output (for `compress` a `*.mvdz` or `-`, for `decompress` anything
+but `*.mvdz`) are an input and its output, and `-o` names the output of a
+single input. `-` is standard input or output (`mvdz decompress game.mvdz
+- | ...`). Sizes take K, M, G suffixes (binary). `-s 1M` cuts the demo into
 independently decodable segments: seek points and parallel decoding, at a
 small cost in size; the default is one segment (a file holds at most 65536
 segments). Compression decodes its own output and compares before writing
@@ -162,9 +174,9 @@ error. `info` prints the JSON described in FORMAT.md §3.2, including
 `bundle_sha256` (§10.2).
 
 ```
-mvdz compress game.mvd game.mvdz
-mvdz compress --fast -s 1M game.mvd game.mvdz
-mvdz decompress game.mvdz game.mvd
+mvdz compress game.mvd
+mvdz compress --fast -s 1M -o game.fast.mvdz game.mvd
+mvdz decompress --gzip demos/*.mvdz
 mvdz info game.mvdz | jq .map
 mvdz attach add game.mvdz analysis/result.json result.json --mime application/json --meta x-tool=mvda
 mvdz attach export game.mvdz - --drop-prefix rec/ > download.mvdz
@@ -188,8 +200,8 @@ first frame is not a whole MVD frame carrying messages that parse (or, if
 that frame is damaged, followed by 16 more whole frames). Nothing is
 written. Truncated demos and demos damaged after their start compress as
 before, with what does not parse stored raw. A few archive files that
-carry a demo after a non-MVD header are refused too; `--force` stores any
-input (it still round-trips, mostly stored raw). When standard output
+carry a demo after a non-MVD header are refused too; `--allow-non-demo`
+stores any input (it still round-trips, mostly stored raw). When standard output
 closes early (`mvdz census demos/ | head`), the tool stops quietly.
 
 ## Hashes and trust

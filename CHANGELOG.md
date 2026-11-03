@@ -10,13 +10,19 @@
   `gunzip`, `write_gzip`, `write_file_atomic_with`.
 * Every encoder refuses input that is not an MVD demo (`check_demo`):
   `Error::NotMvd`, C `MVDZ_E_NOTMVD` (-8). Empty input is refused too. The
-  CLI's `--force` stores any input anyway; `mvdz::encode::compress` is the
+  CLI's `--allow-non-demo` stores any input anyway; `mvdz::encode::compress` is the
   unchecked encoder.
 * `Error` is `#[non_exhaustive]`: a `match` on it needs a `_` arm, and
   later variants are not breaking changes.
 * C: `mvdz_writer_finish` and `mvdz_writer_abort` free a writer handle
   whose earlier call hit an internal error (they return `MVDZ_E_PANIC`).
   Before, such a handle could never be freed.
+* `mvdz compress` and `mvdz decompress` work like zstd: `mvdz compress
+  *.mvd.gz` writes `game.mvdz` beside each `game.mvd.gz` (or `game.mvd`),
+  `mvdz decompress *.mvdz` writes `game.mvd` (`game.mvd.gz` with `--gzip`),
+  several files at once with `-j`. Inputs are kept (`--rm` deletes them),
+  `-o` names the output, and the two-name form `in out` still works.
+  **Changed:** an existing output is no longer overwritten without `-f`.
 * `mvdz decompress --gzip` (or an output named `*.gz`, unless `--no-gzip`)
   writes the demo gzip-compressed.
 * `mvdz census` reports `demoinfo` for raw demos (it was always false for
