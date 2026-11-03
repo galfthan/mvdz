@@ -1,7 +1,9 @@
 //! The library error type.
 
-/// Library error.
+/// Library error. New variants may be added in minor releases, so a
+/// `match` on it needs a `_` arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     /// Not an MVDZ file, or an unsupported version.
     Format(&'static str),
@@ -18,6 +20,8 @@ pub enum Error {
     Io(std::io::ErrorKind),
     /// The encoder could not produce a file that decodes to its input.
     Internal(&'static str),
+    /// The input to compress is not an MVD demo (or is corrupt gzip).
+    NotMvd(&'static str),
 }
 
 impl std::fmt::Display for Error {
@@ -30,6 +34,7 @@ impl std::fmt::Display for Error {
             Error::NotFound => write!(f, "no such attachment"),
             Error::Io(k) => write!(f, "i/o: {k}"),
             Error::Internal(s) => write!(f, "internal: {s}"),
+            Error::NotMvd(s) => write!(f, "not an MVD demo: {s}"),
         }
     }
 }

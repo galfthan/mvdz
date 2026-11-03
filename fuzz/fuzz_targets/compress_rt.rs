@@ -1,7 +1,8 @@
 #![no_main]
-//! Review target: arbitrary bytes through the one-shot encoder (verify on
-//! and off), at both levels and a small segment size; the verified file
-//! must exist and round-trip.
+//! Review target: arbitrary bytes through the one-shot encoder without the
+//! input check (verify on and off), at both levels and a small segment
+//! size; the verified file must exist and round-trip. The checked entry
+//! point refuses exactly what `check_demo` refuses.
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -26,7 +27,7 @@ fuzz_target!(|data: &[u8]| {
         verify: false,
         ..Default::default()
     };
-    let (c, _) = match mvdz::compress_info(demo, &cfg) {
+    let (c, _) = match mvdz::encode::compress(demo, &cfg) {
         Err(mvdz::Error::Invalid("too many segments: use a larger segment size")) => return,
         r => r.expect("compress (no verify)"),
     };
@@ -39,6 +40,14 @@ fuzz_target!(|data: &[u8]| {
         verify: true,
         ..cfg
     };
-    let c = mvdz::compress(demo, &cfg).expect("compress");
+    let (c, _) = mvdz::encode::compress(demo, &cfg).expect("compress");
     assert!(mvdz::decompress(&c, 2).unwrap() == demo);
+    // the checked entry point: refuses exactly what check_demo refuses
+    // (gzip input is decompressed first)
+    if !mvdz::is_gzip(demo) {
+        match mvdz::compress(demo, &cfg) {
+            Err(mvdz::Error::NotMvd(_)) => assert!(mvdz::check_demo(demo).is_err()),
+            r => assert!(r.expect("compress") == c),
+        }
+    }
 });

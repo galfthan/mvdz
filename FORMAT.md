@@ -150,7 +150,7 @@ not know, without reading its body.
 **Order.** A file has two parts:
 
 * the *demo part*: META, the SEGMENT sections in demo order, then INDEX
-  (META may come before, between or after segments; §5.1 says when it must
+  (META may come before, between or after segments; §5.3 says when it must
   come first);
 * the *attachment part*, from the first ATTACH or ADIR section on: ATTACH
   sections, then the ADIR.

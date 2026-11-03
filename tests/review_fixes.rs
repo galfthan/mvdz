@@ -447,9 +447,11 @@ fn c_h1_oversized_directory_refused() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A demo of `n` dem_set frames (10 bytes each).
+/// A demo of a dem_read frame holding one svc_nop, then `n` dem_set
+/// frames (10 bytes each).
 fn sets(n: usize) -> Vec<u8> {
-    let mut v = Vec::with_capacity(n * 10);
+    let mut v = Vec::with_capacity(n * 10 + 7);
+    v.extend_from_slice(&[0, 1, 1, 0, 0, 0, 1]);
     for i in 0..n {
         v.push(1);
         v.push(2);

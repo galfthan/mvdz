@@ -126,15 +126,19 @@ int main(int argc, char **argv) {
     fclose(o);
     printf("aborted recording ok\n");
 
-    /* 8. whole-buffer API; an empty demo gives a NULL buffer */
+    /* 8. whole-buffer API (.mvd or .mvd.gz input); input that is not a
+     * demo is refused */
     unsigned char *z; size_t z_n;
-    rc = mvdz_compress(demo, 0, MVDZ_LEVEL_NORMAL, 0, 1, &z, &z_n);
+    rc = mvdz_compress(demo, (size_t)n, MVDZ_LEVEL_FAST, 0, 1, &z, &z_n);
     if (rc) return fail("compress", rc);
     unsigned char *e; size_t e_n;
     rc = mvdz_decompress(z, z_n, 1, 0, 0, &e, &e_n);
-    if (rc || e != NULL || e_n != 0) return fail("decompress empty", rc);
+    if (rc || e_n != (size_t)n || memcmp(e, demo, n) != 0) return fail("decompress", rc);
     mvdz_free(z, z_n);
     mvdz_free(e, e_n);
+    rc = mvdz_compress("hello world", 11, MVDZ_LEVEL_NORMAL, 0, 1, &z, &z_n);
+    if (rc != MVDZ_E_NOTMVD) return fail("compress of a non-demo", rc);
+    printf("non-demo: %s\n", mvdz_strerror(rc));
     free(back);
     free(demo);
     remove(packed);

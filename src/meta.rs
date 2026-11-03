@@ -782,6 +782,49 @@ pub struct Scan {
     pub clock: Clock,
 }
 
+/// Whether `b` starts like an MVD demo: `Some(true)` or `Some(false)`
+/// once the start of `b` decides it, `None` while more bytes are needed.
+/// A demo starts with a whole frame that carries messages (a non-empty
+/// `dem_read`/`dem_all`/... payload, or hidden or multi-target data; not a
+/// bare `dem_set`), and either its messages parse or, if that first frame
+/// is damaged, the next 16 frames are whole too. A frame's length field
+/// must fit the input, so other files almost never frame: text, gzip,
+/// PNG, TIFF and random bytes fail on the first frame.
+pub fn mvd_start(b: &[u8]) -> Option<bool> {
+    let bad = |b: &[u8], p: usize| b.len() >= p + 2 && matches!(b[p + 1] & 7, 0 | 7);
+    if b.len() < 2 {
+        return None;
+    }
+    let head = match b[1] & 7 {
+        0 | 2 | 7 => return Some(false),
+        3 => 10,
+        _ => 6,
+    };
+    let n = frame_len(b, 0)?;
+    if n <= head {
+        return Some(false);
+    }
+    let mut s = Scanner::new();
+    s.feed(&b[..n]);
+    if s.escapes == 0 {
+        return Some(true);
+    }
+    let mut p = n;
+    for _ in 0..16 {
+        if bad(b, p) {
+            return Some(false);
+        }
+        p += frame_len(b, p)?;
+    }
+    Some(true)
+}
+
+/// `mvd_start` of a whole input: a start that is not decided by the end of
+/// the input is not a demo.
+pub fn starts_like_mvd(b: &[u8]) -> bool {
+    mvd_start(b) == Some(true)
+}
+
 pub fn scan(b: &[u8]) -> Scan {
     let mut s = Scanner::new();
     s.feed(b);

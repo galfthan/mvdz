@@ -33,10 +33,11 @@ pub mod walk;
 pub mod zst;
 
 pub use api::{
-    Config, FileInfo, Info, Selection, Writer, compress, compress_info, decompress,
-    decompress_stream, decompress_with, export_attachments, is_mvdz, list_attachments,
-    read_attachment, read_attachment_with, read_metadata, read_metadata_with, update_attachments,
-    update_attachments_bytes, write_file_atomic,
+    Config, FileInfo, Info, Selection, Writer, check_demo, compress, compress_info, decompress,
+    decompress_stream, decompress_with, export_attachments, gunzip, is_gzip, is_mvdz,
+    list_attachments, read_attachment, read_attachment_with, read_metadata, read_metadata_with,
+    update_attachments, update_attachments_bytes, write_file_atomic, write_file_atomic_with,
+    write_gzip,
 };
 pub use budget::{Limits, ReadOptions};
 pub use error::{Error, Result};

@@ -210,11 +210,14 @@ fuzz_target!(|data: &[u8]| {
                 };
                 assert!(!w.is_null());
                 let demo = &file[..file.len().min(4096)];
-                assert_eq!(
-                    unsafe { mvdz_writer_write(w, demo.as_ptr() as *const c_void, demo.len()) },
-                    0
-                );
-                if op & 32 != 0 {
+                // input that is not a demo is refused (sticky)
+                let not_demo = mvdz::check_demo(demo).is_err();
+                let rc =
+                    unsafe { mvdz_writer_write(w, demo.as_ptr() as *const c_void, demo.len()) };
+                assert!(rc == 0 || (not_demo && rc == MVDZ_E_NOTMVD), "{rc}");
+                if op & 32 != 0 && not_demo {
+                    assert_eq!(unsafe { mvdz_writer_finish(w) }, MVDZ_E_NOTMVD);
+                } else if op & 32 != 0 {
                     assert_eq!(unsafe { mvdz_writer_finish(w) }, 0);
                     let mut p: *mut u8 = std::ptr::null_mut();
                     let mut n = 0usize;

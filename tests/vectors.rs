@@ -492,9 +492,10 @@ fn all_vectors() -> Option<Vec<Vector>> {
     let mut add = |name: &str, b: Vec<u8>, d: &[u8], how: &str| {
         v.push((name.to_string(), b, Some(d.to_vec()), how.to_string()))
     };
-    let one = |d: &[u8], c: Config| mvdz::compress(d, &c).unwrap();
+    // without the input check: some vectors hold non-demo input
+    let one = |d: &[u8], c: Config| mvdz::encode::compress(d, &c).unwrap().0;
     let st = |d: &[u8], c: Config| {
-        let mut w = mvdz::Writer::new(Vec::new(), &c).unwrap();
+        let mut w = mvdz::stream::StreamEncoder::new_unchecked(Vec::new(), &c).unwrap();
         for ch in d.chunks(4000) {
             w.write_demo(ch).unwrap();
         }

@@ -9,11 +9,16 @@ use std::io::{Cursor, Read};
 
 const LEVELS: [Level; 2] = [Level::Normal, Level::Fast];
 
+/// The one-shot encoder without the input check (any bytes round-trip).
+fn unchecked(src: &[u8], c: &Config) -> (Vec<u8>, mvdz::Info) {
+    mvdz::encode::compress(src, c).unwrap()
+}
+
 fn check_all_ways(src: &[u8], what: &str, expect_transform: bool) {
     for level in LEVELS {
         for seg in [0usize, 65536] {
             let c = cfg(level, seg);
-            let (one, info) = mvdz::compress_info(src, &c).unwrap();
+            let (one, info) = unchecked(src, &c);
             if expect_transform {
                 assert_eq!(
                     info.fallback_segments, 0,
@@ -23,13 +28,18 @@ fn check_all_ways(src: &[u8], what: &str, expect_transform: bool) {
             let back = readers_agree(&one, what)
                 .unwrap_or_else(|| panic!("{what}: {level:?} seg {seg} refused"));
             assert!(back == src, "{what}: {level:?} seg {seg} one-shot");
-            let st = stream(
-                src,
-                &Config {
-                    segment: if seg == 0 { 100_000 } else { seg },
-                    ..c.clone()
-                },
-            );
+            let st = if mvdz::check_demo(src).is_ok() {
+                stream(
+                    src,
+                    &Config {
+                        segment: if seg == 0 { 100_000 } else { seg },
+                        ..c.clone()
+                    },
+                )
+            } else {
+                // the streaming writer refuses non-demos (see above)
+                one.clone()
+            };
             let back = readers_agree(&st, what)
                 .unwrap_or_else(|| panic!("{what}: {level:?} seg {seg} streamed refused"));
             assert!(back == src, "{what}: {level:?} seg {seg} streamed");
@@ -55,9 +65,31 @@ fn sample_demos() {
     }
 }
 
+/// Input that is not an MVD demo is refused by every encoder, before
+/// anything is written by the one-shot one.
 #[test]
 fn empty_and_tiny_inputs() {
-    for src in [&b""[..], b"\x00", b"MVDZ\x01", b"hello world"] {
+    let mut rng = Rng(7);
+    let random: Vec<u8> = (0..10_000).map(|_| rng.next() as u8).collect();
+    let text = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md")).unwrap();
+    let inputs: [&[u8]; 7] = [
+        b"",
+        b"\x00",
+        b"MVDZ\x01",
+        b"hello world",
+        b"II*\x00\x08\x00\x00\x00\x00\x00\x00\x00", // a TIFF header
+        &random,
+        &text,
+    ];
+    for src in inputs {
+        for level in LEVELS {
+            let e = mvdz::compress(src, &cfg(level, 0)).unwrap_err();
+            assert!(matches!(e, mvdz::Error::NotMvd(_)), "{e}");
+            let mut w = mvdz::Writer::new(Vec::new(), &cfg(level, 1000)).unwrap();
+            let r = w.write_demo(src).and_then(|_| w.finish().map(|_| ()));
+            assert!(matches!(r, Err(mvdz::Error::NotMvd(_))), "{r:?}");
+        }
+        // the unchecked encoder still round-trips any bytes
         check_all_ways(src, &format!("{src:?}"), false);
     }
 }
@@ -79,6 +111,13 @@ fn non_mvd_input_streams() {
         inputs.push(cut);
     }
     for (i, src) in inputs.iter().enumerate() {
+        // the streaming writer refuses what is not a demo
+        if mvdz::check_demo(src).is_err() {
+            let mut w = mvdz::Writer::new(Vec::new(), &cfg(Level::Fast, 1000)).unwrap();
+            let r = w.write_demo(src).and_then(|_| w.finish().map(|_| ()));
+            assert!(matches!(r, Err(mvdz::Error::NotMvd(_))), "input {i}");
+            continue;
+        }
         for level in LEVELS {
             for seg in [1000usize, 1 << 20] {
                 let st = stream(src, &cfg(level, seg));
@@ -151,6 +190,7 @@ fn seeking() {
 fn edited_demos_round_trip() {
     let base = duel().unwrap_or_else(|| synthetic(&[(1, "{\"a\":"), (0, "1}")], false));
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    let mut refused = 0;
     for case in 0..30 {
         let mut d = base.clone();
         for _ in 0..1 + rng.below(4) {
@@ -177,6 +217,11 @@ fn edited_demos_round_trip() {
         }
         let level = LEVELS[case % 2];
         let seg = [0, 4096, 65536][case % 3];
+        // an edit that destroys the first frame makes it a non-demo
+        if mvdz::check_demo(&d).is_err() {
+            refused += 1;
+            continue;
+        }
         let c = mvdz::compress(&d, &cfg(level, seg)).unwrap();
         assert!(mvdz::decompress(&c, 1).unwrap() == d, "case {case}");
         let st = stream(&d, &cfg(level, seg.max(4096)));
@@ -185,6 +230,9 @@ fn edited_demos_round_trip() {
             "case {case} streamed"
         );
     }
+    // edits within the demo keep it a demo: only cuts into the first frame
+    // are refused
+    assert!(refused <= 6, "{refused} of 30 refused");
 }
 
 /// The constructed demos of the correctness review (float coordinates,
@@ -203,6 +251,20 @@ fn constructed_demos() {
             continue;
         }
         let name = p.file_name().unwrap().to_string_lossy().to_string();
+        // a few have no MVD start (only dem_set frames, a cut first
+        // frame): refused, and still round-trip through the unchecked
+        // encoder
+        if mvdz::check_demo(&src).is_err() {
+            assert!(matches!(
+                mvdz::compress(&src, &cfg(Level::Fast, 0)),
+                Err(mvdz::Error::NotMvd(_))
+            ));
+            for level in LEVELS {
+                let (c, _) = mvdz::encode::compress(&src, &cfg(level, 50_000)).unwrap();
+                assert!(mvdz::decompress(&c, 2).unwrap() == src, "{name}");
+            }
+            continue;
+        }
         for level in LEVELS {
             for seg in [0usize, 50_000] {
                 let c = mvdz::compress(&src, &cfg(level, seg)).unwrap();

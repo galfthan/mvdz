@@ -37,7 +37,7 @@ fuzz_target!(|data: &[u8]| {
         verify: false,
         ..Default::default()
     };
-    let (c, _) = mvdz::compress_info(&demo, &cfg).expect("compress (no verify)");
+    let (c, _) = mvdz::encode::compress(&demo, &cfg).expect("compress (no verify)");
     if std::env::var("REQUIRE_TRANSFORM_LOSSLESS").is_ok() {
         rt(&c, &demo, "unverified transform");
     } else if mvdz::decompress(&c, 1).ok().as_deref() != Some(&demo[..]) {
@@ -50,13 +50,17 @@ fuzz_target!(|data: &[u8]| {
         threads,
         ..Default::default()
     };
-    let (c, _) = mvdz::compress_info(&demo, &cfg).expect("compress");
+    let (c, _) = mvdz::encode::compress(&demo, &cfg).expect("compress");
     rt(&c, &demo, "one-shot");
     assert!(mvdz::decompress(&c, 3).unwrap() == demo);
     let scfg = mvdz::Config {
         segment: seg.max(64),
         ..cfg
     };
+    // the streaming writer checks its input as the one-shot API does
+    if mvdz::check_demo(&demo).is_err() {
+        return;
+    }
     let mut w = mvdz::Writer::new(Vec::new(), &scfg).unwrap();
     let mut i = 0;
     let mut step = 1 + data[1] as usize;

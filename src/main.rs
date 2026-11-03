@@ -5,13 +5,21 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::time::Instant;
 
+/// `println!` that exits quietly when standard output is closed (a pipe
+/// into `head`, say) instead of panicking.
+macro_rules! out {
+    ($($t:tt)*) => {
+        writeln!(std::io::stdout().lock(), $($t)*).unwrap_or_else(|e| stdout_failed(e))
+    };
+}
+
 fn usage() -> ! {
     eprintln!(
         "usage:
-  mvdz compress   [--fast] [-s size] [-j threads] [--ext key=value]... in.mvd out.mvdz
-  mvdz decompress [-j threads] [--max-memory size] [--trusted] in.mvdz out.mvd
+  mvdz compress   [--fast] [-s size] [-j threads] [--ext key=value]... [--force] in.mvd out.mvdz
+  mvdz decompress [-j threads] [--max-memory size] [--trusted] [--gzip | --no-gzip] in.mvdz out.mvd
   mvdz info       file.mvdz...                     metadata, index, attachments as JSON
-  mvdz census     [--tsv] files-or-dirs...         census of .mvdz / .mvd files
+  mvdz census     [--tsv] files-or-dirs...         census of .mvdz / .mvd / .mvd.gz files
   mvdz attach add file.mvdz name path [--mime type] [--meta key=value]...
   mvdz attach ls  file.mvdz [prefix]
   mvdz attach extract file.mvdz name out
@@ -20,9 +28,14 @@ fn usage() -> ! {
                   copy keeping the attachments that match a keep (all if none given) and no drop
   mvdz bench      [--levels normal,fast] [-s size] [-r reps] [-j threads] [--no-verify]
                   [--skip-compress] [--trusted] [--files out.tsv] [--streams out.tsv] files...
-'-' as a file name is standard input or output. Sizes take K, M, G suffixes
-(binary: 1M = 1048576). --fast selects per-stream zstd (default: normal).
--s cuts the demo into independently decodable segments (default: one).
+'-' as a file name is standard input or output. compress also takes gzip
+input (.mvd.gz), decompressed first; input that is not an MVD demo is
+refused (--force stores it anyway). decompress --gzip writes the demo gzip-compressed (the default
+for an output named *.gz; --no-gzip writes it raw). Sizes take K, M, G suffixes
+(binary: 1M = 1048576). --fast selects per-stream zstd: faster to decode,
+slower to compress, larger (default: normal).
+-s cuts the demo into independently decodable segments (default: one,
+which cannot seek; -s 1M for files that will be played or served).
 --trusted skips the SHA-256 identity check (CRC-32C checks only): only for
 files whose SHA-256 was verified before. attach add --mime defaults to
 application/octet-stream; --meta keys need a prefix, x- or vendor. (FORMAT.md 10.1)."
@@ -46,6 +59,8 @@ struct Args {
     tsv: bool,
     skip_compress: bool,
     trusted: bool,
+    gzip: Option<bool>,
+    force: bool,
     keep: Vec<String>,
     keep_prefix: Vec<String>,
     drop: Vec<String>,
@@ -91,6 +106,8 @@ fn parse(args: &[String]) -> Args {
         tsv: false,
         skip_compress: false,
         trusted: false,
+        gzip: None,
+        force: false,
         keep: Vec::new(),
         keep_prefix: Vec::new(),
         drop: Vec::new(),
@@ -125,6 +142,9 @@ fn parse(args: &[String]) -> Args {
             "--tsv" => a.tsv = true,
             "--skip-compress" => a.skip_compress = true,
             "--trusted" => a.trusted = true,
+            "--gzip" => a.gzip = Some(true),
+            "--no-gzip" => a.gzip = Some(false),
+            "--force" => a.force = true,
             "--keep" => a.keep.push(val()),
             "--keep-prefix" => a.keep_prefix.push(val()),
             "--drop" => a.drop.push(val()),
@@ -149,6 +169,15 @@ fn parse(args: &[String]) -> Args {
     a
 }
 
+/// A failed write to standard output: a closed pipe ends the program
+/// quietly (the reader wanted no more), anything else is an error.
+fn stdout_failed(e: std::io::Error) -> ! {
+    if e.kind() == std::io::ErrorKind::BrokenPipe {
+        std::process::exit(0)
+    }
+    die(e)
+}
+
 fn die(e: impl std::fmt::Display) -> ! {
     eprintln!("error: {e}");
     std::process::exit(1)
@@ -168,14 +197,31 @@ fn read_input(p: &str) -> Vec<u8> {
     }
 }
 
-/// Writes an output: standard output, a device or pipe directly, a
-/// regular file atomically (temporary file and rename).
-fn write_output(p: &str, data: &[u8]) {
+/// Reads a raw demo: gzip input (`.mvd.gz`) is decompressed.
+fn read_demo(p: &str) -> Vec<u8> {
+    let b = read_input(p);
+    if !mvdz::is_gzip(&b) {
+        return b;
+    }
+    mvdz::gunzip(&b, Limits::default().memory).unwrap_or_else(|e| die(format!("{p}: {e}")))
+}
+
+/// Writes `data`, gzip-compressed if `gzip`, to `w`.
+fn put(w: &mut impl Write, data: &[u8], gzip: bool) -> std::io::Result<()> {
+    if gzip {
+        mvdz::write_gzip(data, &mut *w)?;
+    } else {
+        w.write_all(data)?;
+    }
+    w.flush()
+}
+
+/// Writes an output (gzip-compressed if `gzip`): standard output, a
+/// device or pipe directly, a regular file atomically (temporary file and
+/// rename).
+fn write_output(p: &str, data: &[u8], gzip: bool) {
     if p == "-" {
-        let mut o = std::io::stdout().lock();
-        o.write_all(data)
-            .and_then(|_| o.flush())
-            .unwrap_or_else(|e| die(e));
+        put(&mut std::io::stdout().lock(), data, gzip).unwrap_or_else(|e| stdout_failed(e));
         return;
     }
     let path = std::path::Path::new(p);
@@ -185,11 +231,10 @@ fn write_output(p: &str, data: &[u8]) {
                 .write(true)
                 .open(path)
                 .unwrap_or_else(|e| die(format!("{p}: {e}")));
-            f.write_all(data)
-                .and_then(|_| f.flush())
-                .unwrap_or_else(|e| die(format!("{p}: {e}")));
+            put(&mut f, data, gzip).unwrap_or_else(|e| die(format!("{p}: {e}")));
         }
-        _ => api::write_file_atomic(path, data).unwrap_or_else(|e| die(format!("{p}: {e}"))),
+        _ => api::write_file_atomic_with(path, |f| put(f, data, gzip))
+            .unwrap_or_else(|e| die(format!("{p}: {e}"))),
     }
 }
 
@@ -219,6 +264,7 @@ fn main() {
             if a.files.len() != 2 {
                 usage();
             }
+            // gzip input is decompressed and non-demos refused by the library
             let src = read_input(&a.files[0]);
             let cfg = Config {
                 level: a.levels[0],
@@ -227,14 +273,31 @@ fn main() {
                 verify: !a.no_verify,
                 ext: a.ext.clone(),
             };
-            let (out, info) = api::compress_info(&src, &cfg).unwrap_or_else(|e| die(e));
+            let r = if a.force {
+                // store whatever it is (it still round-trips)
+                let raw = if mvdz::is_gzip(&src) {
+                    mvdz::gunzip(&src, Limits::default().memory)
+                } else {
+                    Ok(src)
+                };
+                raw.and_then(|r| mvdz::encode::compress(&r, &cfg))
+            } else {
+                api::compress_info(&src, &cfg)
+            };
+            let (out, info) = r.unwrap_or_else(|e| match e {
+                mvdz::Error::NotMvd(s) if !s.starts_with("corrupt gzip") => die(format!(
+                    "{}: {e} (--force compresses it anyway, mostly stored)",
+                    a.files[0]
+                )),
+                _ => die(format!("{}: {e}", a.files[0])),
+            });
             if info.fallback_segments > 0 {
                 eprintln!(
                     "note: {} of {} segments stored without the transform",
                     info.fallback_segments, info.segments
                 );
             }
-            write_output(&a.files[1], &out);
+            write_output(&a.files[1], &out, false);
         }
         "decompress" | "d" => {
             if a.files.len() != 2 {
@@ -244,7 +307,9 @@ fn main() {
             let out =
                 api::decompress_with(&src, a.threads, &read_options(&a)).unwrap_or_else(|e| die(e));
             drop(src);
-            write_output(&a.files[1], &out);
+            // gzip output when asked, or by default for an output named .gz
+            let gzip = a.gzip.unwrap_or(a.files[1].ends_with(".gz"));
+            write_output(&a.files[1], &out, gzip);
         }
         "bench" => bench(&a),
         "info" => info(&a),
@@ -282,18 +347,14 @@ fn loadavg() -> String {
 /// In-memory library benchmark: every figure is MB/s of raw demo
 /// (MB = 10^6 bytes), the median of `reps` runs with [min-max].
 fn bench(a: &Args) {
-    let files: Vec<(String, Vec<u8>)> = a
-        .files
-        .iter()
-        .map(|f| (f.clone(), std::fs::read(f).unwrap_or_else(|e| die(e))))
-        .collect();
+    let files: Vec<(String, Vec<u8>)> = a.files.iter().map(|f| (f.clone(), read_demo(f))).collect();
     let raw: usize = files.iter().map(|f| f.1.len()).sum();
     let mb = raw as f64 / 1e6;
     let nt = a.threads.max(1);
     let reps = a.reps.max(3);
     let lim = read_options(a);
     let dec = |c: &[u8], t: usize| api::decompress_with(c, t, &lim);
-    println!(
+    out!(
         "files {}  raw {:.2} MB (10^6 bytes)  reps {}  segment {}  threads {}  verify {}  trusted {}  loadavg {}",
         files.len(),
         mb,
@@ -304,7 +365,7 @@ fn bench(a: &Args) {
         a.trusted,
         loadavg()
     );
-    println!(
+    out!(
         "MB/s of raw demo: median [min-max] over {reps} runs; 'batch' = files in parallel on {nt} threads, 1 thread each"
     );
     let mut stream_rows: BTreeMap<(String, String), (usize, usize)> = BTreeMap::new();
@@ -398,25 +459,25 @@ fn bench(a: &Args) {
                 tdb.push(mb / t.elapsed().as_secs_f64());
             }
         }
-        println!(
+        out!(
             "{ln:<7} bytes {bytes}  ratio {:.4}  sha ok {ok}/{}  fallback segments {fb}",
             bytes as f64 / raw as f64,
             files.len()
         );
-        println!(
+        out!(
             "  compress   1t {}   {nt}t {}   batch {}",
             fmt(stats(&mut tc1)),
             fmt(stats(&mut tcn)),
             fmt(stats(&mut tcb))
         );
-        println!(
+        out!(
             "  decompress 1t {}   {nt}t {}   batch {}",
             fmt(stats(&mut td1)),
             fmt(stats(&mut tdn)),
             fmt(stats(&mut tdb))
         );
     }
-    println!("loadavg after: {}", loadavg());
+    out!("loadavg after: {}", loadavg());
     if let Some(path) = &a.perfile {
         std::fs::write(path, &perfile).unwrap_or_else(|e| die(e));
     }
@@ -433,7 +494,7 @@ fn info(a: &Args) {
     for f in &a.files {
         let r = std::fs::File::open(f).unwrap_or_else(|e| die(e));
         match api::read_metadata(std::io::BufReader::new(r)) {
-            Ok(fi) => println!("{}", fi.to_json()),
+            Ok(fi) => out!("{}", fi.to_json()),
             Err(e) => die(format!("{f}: {e}")),
         }
     }
@@ -461,7 +522,7 @@ fn census(a: &Args) {
     // cannot inject terminal escapes, columns or rows
     let esc = |s: &str| s.escape_debug().to_string();
     if a.tsv {
-        println!(
+        out!(
             "file\tsha256\tsize\tframes\tduration_ms\tmap\tprotocol_ext\tescapes\ttruncated\tdemoinfo\tcensus_bytes"
         );
     }
@@ -481,9 +542,25 @@ fn census(a: &Args) {
                     continue;
                 }
             }
-        } else if name.ends_with(".mvd") {
-            let Ok(b) = std::fs::read(&p) else { continue };
-            mvdz::Metadata::from_scan(mvdz::meta::scan(&b), Vec::new())
+        } else if name.ends_with(".mvd") || name.ends_with(".mvd.gz") {
+            let Ok(mut b) = std::fs::read(&p) else {
+                continue;
+            };
+            if mvdz::is_gzip(&b) {
+                match mvdz::gunzip(&b, Limits::default().memory) {
+                    Ok(d) => b = d,
+                    Err(e) => {
+                        eprintln!("{name}: {e}");
+                        continue;
+                    }
+                }
+            }
+            let s = mvdz::meta::scan(&b);
+            // the demoinfo the scan found (an .mvdz has it in its metadata)
+            let demoinfo = s.demoinfo.clone();
+            let mut m = mvdz::Metadata::from_scan(s, Vec::new());
+            m.demoinfo = demoinfo;
+            m
         } else {
             continue;
         };
@@ -501,7 +578,7 @@ fn census(a: &Args) {
                     x => x.to_string(),
                 }
             };
-            println!(
+            out!(
                 "{}\t{}\t{}\t{}\t{}\t{}\t{}/{}/{}\t{}\t{}\t{}\t{}",
                 esc(&name),
                 api::hex(&m.sha256),
@@ -519,7 +596,7 @@ fn census(a: &Args) {
             );
         } else {
             let j = serde_json::json!({"file": name, "sha256": api::hex(&m.sha256), "demoinfo": !m.demoinfo.is_empty(), "census": census});
-            println!("{j}");
+            out!("{j}");
         }
     }
 }
@@ -548,7 +625,7 @@ fn attach(argv: &[String]) {
             let prefix = a.files.get(1).map(|s| s.as_str()).unwrap_or("");
             // names and values come from the file: printed escaped
             let esc = |s: &str| s.escape_debug().to_string();
-            println!("name\tmime\tsize\tstored\tkeys");
+            out!("name\tmime\tsize\tstored\tkeys");
             for e in
                 api::list_attachments(std::io::BufReader::new(r), prefix).unwrap_or_else(|e| die(e))
             {
@@ -556,7 +633,7 @@ fn attach(argv: &[String]) {
                     e.kv.iter()
                         .map(|(k, v)| format!("{}={}", esc(k), esc(v)))
                         .collect();
-                println!(
+                out!(
                     "{}\t{}\t{}\t{}\t{}",
                     esc(&e.name),
                     esc(&e.mime),
@@ -573,7 +650,7 @@ fn attach(argv: &[String]) {
             let r = std::fs::File::open(path).unwrap_or_else(|e| die(e));
             let d = api::read_attachment(std::io::BufReader::new(r), &a.files[1])
                 .unwrap_or_else(|e| die(e));
-            write_output(&a.files[2], &d);
+            write_output(&a.files[2], &d, false);
         }
         "export" => {
             if a.files.len() != 2 {
@@ -590,7 +667,7 @@ fn attach(argv: &[String]) {
             let h =
                 api::export_attachments(std::io::BufReader::new(r), &mut out, |e| sel.matches(e))
                     .unwrap_or_else(|e| die(e));
-            write_output(&a.files[1], &out);
+            write_output(&a.files[1], &out, false);
             eprintln!("bundle_sha256 {}", api::hex(&h));
         }
         "rm" => {

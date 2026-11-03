@@ -69,7 +69,7 @@ normal level; [BENCHMARKS.md](BENCHMARKS.md)).
 ## Quickstart
 
 ```
-mvdz compress game.mvd game.mvdz             # normal level, one segment
+mvdz compress game.mvd.gz game.mvdz          # normal level, one segment (.mvd or .mvd.gz)
 mvdz compress --fast -s 1M game.mvd game.mvdz  # faster decode, seekable segments
 mvdz decompress game.mvdz game.mvd
 mvdz info game.mvdz | jq .sha256             # metadata, without decoding
@@ -132,10 +132,10 @@ including a check that the output decodes to the input.
 ## Command line
 
 ```
-mvdz compress   [--fast] [-s size] [-j threads] [--ext key=value]... in.mvd out.mvdz
-mvdz decompress [-j threads] [--max-memory size] [--trusted] in.mvdz out.mvd
+mvdz compress   [--fast] [-s size] [-j threads] [--ext key=value]... [--force] in.mvd out.mvdz
+mvdz decompress [-j threads] [--max-memory size] [--trusted] [--gzip | --no-gzip] in.mvdz out.mvd
 mvdz info       file.mvdz...                 metadata, index, attachments as JSON
-mvdz census     [--tsv] files-or-dirs...     census of .mvdz / .mvd files
+mvdz census     [--tsv] files-or-dirs...     census of .mvdz / .mvd / .mvd.gz files
 mvdz attach add file.mvdz name path [--mime type] [--meta key=value]...
 mvdz attach ls  file.mvdz [name-prefix]
 mvdz attach extract file.mvdz name out
@@ -169,6 +169,28 @@ mvdz info game.mvdz | jq .map
 mvdz attach add game.mvdz analysis/result.json result.json --mime application/json --meta x-tool=mvda
 mvdz attach export game.mvdz - --drop-prefix rec/ > download.mvdz
 ```
+
+**gzip.** `compress` takes a raw `.mvd` or a gzip-compressed one
+(`.mvd.gz`, as most archives serve them; every gzip member, as `gunzip`
+reads them), and so do the library and the C `mvdz_compress`. The file
+holds the raw demo: the output is byte for byte the same as from the raw
+`.mvd`, its identity is the SHA-256 of the raw demo (not of the `.gz`),
+and decompressing gives the raw `.mvd` back. Corrupt gzip (a bad CRC, a
+truncated file) is an error. `decompress --gzip` writes the demo
+gzip-compressed instead (level 6), also to `-`; an output name ending in
+`.gz` does the same unless `--no-gzip` is given. That `.gz` is not the
+same bytes as the archive's original `.gz` (another compressor and
+level), but the demo inside is identical. The streaming writer takes raw
+MVD only.
+
+**Input that is not a demo is refused**: empty input, and input whose
+first frame is not a whole MVD frame carrying messages that parse (or, if
+that frame is damaged, followed by 16 more whole frames). Nothing is
+written. Truncated demos and demos damaged after their start compress as
+before, with what does not parse stored raw. A few archive files that
+carry a demo after a non-MVD header are refused too; `--force` stores any
+input (it still round-trips, mostly stored raw). When standard output
+closes early (`mvdz census demos/ | head`), the tool stops quietly.
 
 ## Hashes and trust
 
@@ -351,5 +373,6 @@ ideas fit `proposals/`. See [CHANGELOG.md](CHANGELOG.md) for releases.
 MIT, see [LICENSE](LICENSE). Dependencies (all permissive): `zstd`, `zstd-safe`,
 `zstd-sys` (MIT/Apache-2.0; bundled libzstd BSD-3-Clause), `ruzstd`
 (MIT, wasm and the `pure-zstd` feature), `sha2` and RustCrypto
-dependencies, `serde` and `serde_json` (MIT/Apache-2.0), `libc` (only the
+dependencies, `serde` and `serde_json` (MIT/Apache-2.0), `flate2` and
+`miniz_oxide` (MIT/Apache-2.0, pure Rust; gzip input), `libc` (only the
 optional `sampler` profiler of the command-line tool).

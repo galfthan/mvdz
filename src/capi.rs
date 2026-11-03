@@ -35,6 +35,7 @@ pub const MVDZ_E_IO: c_int = -4;
 pub const MVDZ_E_NOTFOUND: c_int = -5;
 pub const MVDZ_E_PANIC: c_int = -6;
 pub const MVDZ_E_LIMIT: c_int = -7;
+pub const MVDZ_E_NOTMVD: c_int = -8;
 
 /// Decode flag: trusted input, skip the SHA-256 identity check (the
 /// CRC-32C checks still run).
@@ -49,6 +50,7 @@ fn code(e: &Error) -> c_int {
         Error::NotFound => MVDZ_E_NOTFOUND,
         Error::Io(_) => MVDZ_E_IO,
         Error::Internal(_) => MVDZ_E_PANIC,
+        Error::NotMvd(_) => MVDZ_E_NOTMVD,
     }
 }
 
@@ -143,6 +145,7 @@ pub extern "C" fn mvdz_strerror(code: c_int) -> *const c_char {
         MVDZ_E_NOTFOUND => b"not found\0",
         MVDZ_E_PANIC => b"internal error\0",
         MVDZ_E_LIMIT => b"memory or work limit exceeded\0",
+        MVDZ_E_NOTMVD => b"input is not an MVD demo (or is corrupt gzip)\0",
         _ => b"unknown error\0",
     };
     s.as_ptr() as *const c_char
@@ -1065,27 +1068,43 @@ pub unsafe extern "C" fn mvdz_writer_set_ext(
     })
 }
 
-fn take_writer(w: *const c_void) -> Option<api::Writer<WCb>> {
-    let h = lookup(w)?;
-    let mut g = lock(&h).ok()?;
-    let Handle::W(wh) = &mut *g.g else {
-        return None;
+/// Takes the writer out of its handle and unregisters the handle. A handle
+/// whose earlier call panicked is unregistered too, its writer dropped
+/// unfinished, and gives MVDZ_E_PANIC: finish and abort always free a
+/// writer handle, except from inside its own callback.
+fn take_writer(w: *const c_void) -> Result<api::Writer<WCb>, c_int> {
+    let h = lookup(w).ok_or(MVDZ_E_INVALID)?;
+    if h.owner.load(Ordering::SeqCst) == thread_id() {
+        return Err(MVDZ_E_INVALID);
+    }
+    let mut g = match h.h.lock() {
+        Ok(g) => g,
+        Err(p) => {
+            if !matches!(*p.into_inner(), Handle::W(_)) {
+                return Err(MVDZ_E_INVALID);
+            }
+            drop(unregister(w));
+            return Err(MVDZ_E_PANIC);
+        }
+    };
+    let Handle::W(wh) = &mut *g else {
+        return Err(MVDZ_E_INVALID);
     };
     let wr = wh.0.take();
     drop(g);
     drop(unregister(w));
-    wr
+    wr.ok_or(MVDZ_E_INVALID)
 }
 
 /// Ends the demo (writes metadata, index, trailer) and frees the handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mvdz_writer_finish(w: *mut MvdzWriter) -> c_int {
     guard(MVDZ_E_PANIC, || match take_writer(w) {
-        Some(wr) => match wr.finish() {
+        Ok(wr) => match wr.finish() {
             Ok(_) => MVDZ_OK,
             Err(e) => code(&e),
         },
-        None => MVDZ_E_INVALID,
+        Err(c) => c,
     })
 }
 
@@ -1094,10 +1113,62 @@ pub unsafe extern "C" fn mvdz_writer_finish(w: *mut MvdzWriter) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mvdz_writer_abort(w: *mut MvdzWriter) -> c_int {
     guard(MVDZ_E_PANIC, || match take_writer(w) {
-        Some(wr) => {
+        Ok(wr) => {
             let _ = wr.abort();
             MVDZ_OK
         }
-        None => MVDZ_E_INVALID,
+        Err(c) => c,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    unsafe extern "C" fn sink(_: *mut c_void, _: *const c_void, n: usize) -> c_longlong {
+        n as c_longlong
+    }
+
+    fn open() -> *mut MvdzWriter {
+        let mut err = 0;
+        let w = unsafe { mvdz_writer_open(Some(sink), std::ptr::null_mut(), 0, 0, 1, &mut err) };
+        assert_eq!(err, MVDZ_OK);
+        w
+    }
+
+    /// Poisons the handle's lock, as a call that panicked inside it does.
+    fn poison(w: *const c_void) {
+        let h = lookup(w).unwrap();
+        let _ = std::thread::spawn(move || {
+            let _g = h.h.lock().unwrap();
+            panic!("poison the handle");
+        })
+        .join();
+    }
+
+    #[test]
+    fn a_panicked_writer_handle_is_freed_by_finish_and_abort() {
+        for finish in [true, false] {
+            let w = open();
+            poison(w);
+            let f = |w| unsafe {
+                if finish {
+                    mvdz_writer_finish(w)
+                } else {
+                    mvdz_writer_abort(w)
+                }
+            };
+            assert_eq!(f(w), MVDZ_E_PANIC);
+            assert!(lookup(w).is_none(), "the handle is freed");
+            assert_eq!(f(w), MVDZ_E_INVALID);
+        }
+    }
+
+    #[test]
+    fn finish_and_abort_free_a_healthy_writer_handle() {
+        let w = open();
+        assert_eq!(unsafe { mvdz_writer_abort(w) }, MVDZ_OK);
+        assert!(lookup(w).is_none());
+        assert_eq!(unsafe { mvdz_writer_abort(w) }, MVDZ_E_INVALID);
+    }
 }

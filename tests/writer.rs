@@ -192,7 +192,9 @@ fn c_handles() {
         }
         // empty results are NULL
         let (mut out, mut on) = (std::ptr::null_mut(), 1usize);
-        let empty = mvdz::compress(b"", &cfg(Level::Normal, 0)).unwrap();
+        let empty = mvdz::encode::compress(b"", &cfg(Level::Normal, 0))
+            .unwrap()
+            .0;
         assert_eq!(
             mvdz_decompress(
                 empty.as_ptr() as *const _,

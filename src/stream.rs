@@ -39,6 +39,8 @@ pub struct StreamEncoder<W: Write> {
     proto: Proto,
     scan: Scanner,
     dinfo: Vec<u8>,
+    /// the start of the demo passed the input check
+    started: bool,
     /// a segment shared demoinfo: hold every later segment until the end
     hold: bool,
     held: Vec<(Vec<u8>, IndexSeg)>,
@@ -70,6 +72,7 @@ impl<W: Write> StreamEncoder<W> {
             proto: Proto::default(),
             scan: Scanner::new(),
             dinfo: Vec::new(),
+            started: false,
             hold: false,
             held: Vec::new(),
             index: Index::default(),
@@ -78,6 +81,15 @@ impl<W: Write> StreamEncoder<W> {
             crc: Crc::default(),
             failed: None,
         })
+    }
+
+    /// As `new`, without the input check: any bytes are stored (they
+    /// round-trip). For test vectors of non-demo input.
+    #[doc(hidden)]
+    pub fn new_unchecked(w: W, cfg: &Config) -> Result<Self> {
+        let mut e = Self::new(w, cfg)?;
+        e.started = true;
+        Ok(e)
     }
 
     fn check(&self) -> Result<()> {
@@ -110,6 +122,18 @@ impl<W: Write> StreamEncoder<W> {
     pub fn write_demo(&mut self, data: &[u8]) -> Result<()> {
         self.guard(|s| {
             s.pending.extend_from_slice(data);
+            // the input check of the one-shot encoder, as soon as the start
+            // of the demo decides it; nothing is cut before
+            if !s.started {
+                if crate::api::is_gzip(&s.pending) {
+                    crate::api::check_demo(&s.pending)?;
+                }
+                match crate::meta::mvd_start(&s.pending) {
+                    None => return Ok(()),
+                    Some(false) => crate::api::check_demo(&s.pending)?,
+                    Some(true) => s.started = true,
+                }
+            }
             loop {
                 while let Some(n) = frame_len(&s.pending, s.framed) {
                     s.framed += n;
@@ -222,6 +246,9 @@ impl<W: Write> StreamEncoder<W> {
     /// it returns that error and writes nothing more.
     pub fn finish(mut self) -> Result<W> {
         self.guard(|s| {
+            if !s.started {
+                crate::api::check_demo(&s.pending)?;
+            }
             if !s.pending.is_empty() {
                 let seg = std::mem::take(&mut s.pending);
                 s.segment(&seg)?;

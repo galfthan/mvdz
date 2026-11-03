@@ -10,20 +10,74 @@ use std::io::{Read, Seek, Write};
 pub use crate::encode::{Config, Info};
 pub use crate::format::{AttachInfo, Attachment, Index, Metadata};
 
-/// Compresses a demo.
+/// Compresses a demo: a raw `.mvd`, or a gzip-compressed one (`.mvd.gz`),
+/// which is decompressed first. The file holds the raw demo: its identity
+/// is the raw demo's SHA-256 and decompressing gives the raw `.mvd` back.
+/// Input that is not an MVD demo is `Error::NotMvd` (see `check_demo`).
 pub fn compress(src: &[u8], cfg: &Config) -> Result<Vec<u8>> {
-    crate::encode::compress(src, cfg).map(|r| r.0)
+    compress_info(src, cfg).map(|r| r.0)
 }
 
-/// Compresses a demo and reports what the encoder did.
+/// Compresses a demo (as `compress`) and reports what the encoder did.
 pub fn compress_info(src: &[u8], cfg: &Config) -> Result<(Vec<u8>, Info)> {
+    let raw;
+    let src = if is_gzip(src) {
+        raw = gunzip(src, Limits::default().memory)?;
+        &raw[..]
+    } else {
+        src
+    };
+    check_demo(src)?;
     crate::encode::compress(src, cfg)
+}
+
+/// Checks that `src` is an MVD demo, as the encoders do before any work:
+/// its first frame must be whole, carry messages (not only a `dem_set`)
+/// and parse without an escape (FORMAT.md §6.2). Real demos start with
+/// the server data; a truncated or partly damaged demo passes as long as
+/// its start is intact, and what does not parse later is stored raw as
+/// always. Empty input, gzip data and other files fail with
+/// `Error::NotMvd`.
+pub fn check_demo(src: &[u8]) -> Result<()> {
+    if src.is_empty() {
+        return Err(Error::NotMvd("empty input"));
+    }
+    if is_gzip(src) {
+        return Err(Error::NotMvd("gzip-compressed data"));
+    }
+    if !crate::meta::starts_like_mvd(src) {
+        return Err(Error::NotMvd("the first frame does not parse"));
+    }
+    Ok(())
 }
 
 /// True if `b` starts with the MVDZ magic and a version this library
 /// reads (needs 5 bytes; the flags byte is not checked).
 pub fn is_mvdz(b: &[u8]) -> bool {
     b.len() >= 5 && &b[..4] == MAGIC && b[4] == VERSION
+}
+
+/// True if `b` starts with the gzip magic (RFC 1952: `1f 8b`), as the
+/// `.mvd.gz` files of most demo archives do.
+pub fn is_gzip(b: &[u8]) -> bool {
+    b.starts_with(&[0x1f, 0x8b])
+}
+
+/// Decompresses gzip data (every member, as `gzip -d` does), refusing
+/// output over `max` bytes. A bad CRC, a truncated stream or anything
+/// else gzip refuses is `Error::NotMvd`, never a partial result.
+pub fn gunzip(b: &[u8], max: u64) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    flate2::read::MultiGzDecoder::new(b)
+        .take(max.saturating_add(1))
+        .read_to_end(&mut out)
+        .map_err(|_| Error::NotMvd("corrupt gzip data (bad CRC, truncated or damaged)"))?;
+    if out.len() as u64 > max {
+        return Err(Error::Limit(
+            "gzip data decompresses to more than the limit",
+        ));
+    }
+    Ok(out)
 }
 
 /// Decompresses a whole file with up to `threads` threads and the default
@@ -571,7 +625,7 @@ pub fn update_attachments(
     let mut b = Vec::new();
     f.read_to_end(&mut b)?;
     let out = update_attachments_bytes(&b, remove, add)?;
-    replace_locked(&real, &out, m.permissions(), gid(&m))?;
+    replace_locked(&real, |f| f.write_all(&out), m.permissions(), gid(&m))?;
     drop(f);
     Ok(())
 }
@@ -627,7 +681,7 @@ fn temp_name(name: &str, attempt: u32) -> String {
 /// `group`.
 fn replace_locked(
     path: &std::path::Path,
-    data: &[u8],
+    fill: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
     perm: std::fs::Permissions,
     group: Option<u32>,
 ) -> Result<()> {
@@ -666,7 +720,7 @@ fn replace_locked(
             let _ = std::os::unix::fs::fchown(&f, None, Some(gid));
         }
         f.set_permissions(perm)?;
-        f.write_all(data)?;
+        fill(&mut f)?;
         f.sync_all()?;
         drop(f);
         std::fs::rename(&tmp, path)?;
@@ -685,6 +739,15 @@ fn replace_locked(
 /// directory, fsync, rename, fsync of the directory). New files get mode
 /// 0644 subject to the umask; an existing file keeps its permissions.
 pub fn write_file_atomic(path: &std::path::Path, data: &[u8]) -> Result<()> {
+    write_file_atomic_with(path, |f| f.write_all(data))
+}
+
+/// As `write_file_atomic`, with the contents written by `fill` (e.g.
+/// through an encoder, without building them in memory first).
+pub fn write_file_atomic_with(
+    path: &std::path::Path,
+    fill: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> Result<()> {
     let (perm, group) = match std::fs::metadata(path) {
         Ok(m) => (m.permissions(), gid(&m)),
         Err(_) => {
@@ -703,7 +766,16 @@ pub fn write_file_atomic(path: &std::path::Path, data: &[u8]) -> Result<()> {
             (p, None)
         }
     };
-    replace_locked(path, data, perm, group)
+    replace_locked(path, fill, perm, group)
+}
+
+/// Writes `data` gzip-compressed (level 6) to `w`, streamed. The gzip
+/// bytes differ from other gzip tools' output; the demo inside is the
+/// same.
+pub fn write_gzip<W: Write>(data: &[u8], w: W) -> std::io::Result<W> {
+    let mut e = flate2::write::GzEncoder::new(w, flate2::Compression::new(6));
+    e.write_all(data)?;
+    e.finish()
 }
 
 /// The original demo, read sequentially (any reader).
