@@ -223,6 +223,24 @@ impl<W: Write> StreamEncoder<W> {
         Ok(())
     }
 
+    /// Sets an extension metadata key (FORMAT.md §3, tag 10), replacing
+    /// its value if the key is set already. The metadata is written by
+    /// `finish`, so this may be called at any time before it. A key the
+    /// metadata cannot take (all keys and values over 1 MiB) is an error
+    /// that leaves the encoder as it was; after an earlier error it returns
+    /// that error.
+    pub fn set_ext(&mut self, key: &str, value: &[u8]) -> Result<()> {
+        self.check()?;
+        let mut ext = self.cfg.ext.clone();
+        match ext.iter_mut().find(|(k, _)| k == key) {
+            Some(e) => e.1 = value.to_vec(),
+            None => ext.push((key.to_string(), value.to_vec())),
+        }
+        check_ext(&ext)?;
+        self.cfg.ext = ext;
+        Ok(())
+    }
+
     /// Ends the demo: writes the remaining segments, the metadata, the
     /// index and the trailer. Returns the writer. After an earlier error
     /// it returns that error and writes nothing more.

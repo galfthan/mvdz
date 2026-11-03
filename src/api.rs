@@ -130,6 +130,12 @@ impl<W: Write> Writer<W> {
     pub fn write_demo(&mut self, b: &[u8]) -> Result<()> {
         self.0.write_demo(b)
     }
+    /// Sets an extension metadata key, replacing an earlier value of the
+    /// same key; any time before `finish`. A refused key (the extension
+    /// metadata over 1 MiB) leaves the writer as it was.
+    pub fn set_ext(&mut self, key: &str, value: &[u8]) -> Result<()> {
+        self.0.set_ext(key, value)
+    }
     /// Ends the demo (metadata, index, trailer) and returns the writer.
     pub fn finish(self) -> Result<W> {
         self.0.finish()

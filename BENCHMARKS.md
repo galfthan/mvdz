@@ -35,9 +35,13 @@ SHA-256 of the raw demo.
 |---|---|---|---|
 | holdout | 200 | 462 MB | seeded shuffle of the whole archive (Python `random.Random(20261102)`), demos whose first frame is not svc_serverdata dropped |
 | fresh | 100 | 252 MB | the same, independent seed (`0xF2E5B`), drawn by a reviewer |
-| sample40 | 40 | 140 MB | the development sample (random archive demos) |
+| sample40 | 40 | 140 MB | the development sample: 27 archive demos and 13 recent hub games from a test corpus |
 | stratified | 585 | 1.19 GB | stratified by era (7 classes, from `matchdate`, the date in the server info or the server version) x gz-size tercile (21 cells); half proportional, half equal allocation, at least 8 per cell; seed 20261102; weights cell size / picks, scaled to the archive |
 | campaign | 110 | 239 MB | `shuf --random-source` seeded 20261102 |
+
+The lists of every sample (the SHA-256 of each raw demo, which is the
+hub's `demo_sha256`), with their seeds and, for the stratified sample, the
+cells and weights, are in [`benchmarks/samples/`](benchmarks/samples).
 
 The headline ratios use the stratified sample, weighted to the archive,
 with 95 % stratified bootstrap intervals (2,000 resamples). The 300 =
@@ -67,7 +71,16 @@ the normal level, 27.2 [26.5-27.9] GB at the fast level.
 A typical demo compresses a little less well than the total: the per-demo
 median is 0.231 (normal) and 0.258 (fast). Demos of a few KB can come out
 larger than their gzip (7 of 585 here): the metadata is about 2-4 KB per
-file. Segmenting costs about +2 to +4 % at `-s 1M` (+3.8 % normal, +1.8 %
+file. The normal level is not smaller than fast on every demo: rANS codes
+each stream with static, per-context tables, while zstd also finds
+repeated runs of values. On a demo that repeats long runs of identical
+content, which constructed demos do, the fast level can be smaller: the
+test vector `float-mvd1` (a constructed MVD1 demo with float coordinates)
+is 114,304 bytes at normal and 81,017 at fast. It is not a cold start on a
+small file: eight copies of the same demo in a row cost normal 2.2 bytes
+per float coordinate, as one copy does, while zstd codes the copies almost
+for free. On the real FTE float-coordinate vector (`float-fte`) normal is
+the smaller (0.411 against 0.439 of raw). Segmenting costs about +2 to +4 % at `-s 1M` (+3.8 % normal, +1.8 %
 fast; 64 KiB segments: about +29 % on sample40).
 
 **By era** (year of the demo; byte-weighted, archive-weighted, 95 %
@@ -219,7 +232,8 @@ tests (the pipelined decoder's raw-pointer writer, `par_map`).
 The demos used here are public QuakeWorld demos; any collection of `.mvd`
 files works the same way. A demo hub that serves demos by their SHA-256
 (as the QuakeWorld hub's CDN does) makes a sample reproducible from a list
-of hashes.
+of hashes: [`benchmarks/samples/`](benchmarks/samples) holds the lists
+used here.
 
 ```
 # ratios and library speeds over a set of demos

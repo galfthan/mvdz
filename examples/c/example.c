@@ -1,6 +1,6 @@
 /* Example: decode an .mvdz through stdio callbacks (as an engine would
  * through its VFS), seek by time, read the metadata, and stream-compress
- * a demo back. Usage: example file.mvd  (any QuakeWorld MVD demo). */
+ * a demo back (with an extension metadata key). Usage: example file.mvd  (any QuakeWorld MVD demo). */
 #define _FILE_OFFSET_BITS 64
 #include "mvdz.h"
 #include <stdio.h>
@@ -44,12 +44,15 @@ int main(int argc, char **argv) {
     int err = 0;
     mvdz_writer *w = mvdz_writer_open(f_write, o, MVDZ_LEVEL_NORMAL, 256 * 1024, 1, &err);
     if (!w) return fail("writer_open", err);
+    /* extension metadata: where the demo came from (any time before finish) */
+    int rc = mvdz_writer_set_ext(w, "source", "example.c", 9);
+    if (rc) return fail("writer_set_ext", rc);
     for (long i = 0; i < n; i += 4000) {
         long k = n - i < 4000 ? n - i : 4000;
         int rc = mvdz_writer_write(w, demo + i, (size_t)k);
         if (rc) return fail("writer_write", rc);
     }
-    int rc = mvdz_writer_finish(w);
+    rc = mvdz_writer_finish(w);
     if (rc) return fail("writer_finish", rc);
     long packed_n = ftell(o);
     fclose(o);
@@ -60,6 +63,7 @@ int main(int argc, char **argv) {
     char *json; size_t json_n;
     rc = mvdz_info_json(f_read, f_seek, p, 0, &json, &json_n);
     if (rc) return fail("info_json", rc);
+    if (!strstr(json, "\"source\":\"example.c\"")) { fprintf(stderr, "ext key missing\n"); return 1; }
     printf("metadata: %.120s...\n", json);
     mvdz_free(json, json_n);
 

@@ -223,3 +223,6 @@ key were absent.
 9. Does `ref` need to be in the format at all (transcripts are its only
    use), and what should a reader do with a dangling `ref`?
 10. Is visibility worth carrying at all, given that it is advisory?
+
+**Feedback**: open an issue on GitHub
+(<https://github.com/galfthan/mvdz/issues>).

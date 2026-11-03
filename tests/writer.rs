@@ -281,6 +281,12 @@ fn c_writer() {
             MVDZ_E_IO
         );
         assert_eq!(mvdz_writer_finish(w), MVDZ_E_IO);
+        // a failed finish freed the handle too
+        assert_eq!(
+            mvdz_writer_write(w, src.as_ptr() as *const _, 10),
+            MVDZ_E_INVALID
+        );
+        assert_eq!(mvdz_writer_finish(w), MVDZ_E_INVALID);
         // abort
         let mut sink = (Vec::<u8>::new(), 0usize);
         let w = mvdz_writer_open(
@@ -298,5 +304,67 @@ fn c_writer() {
         assert_eq!(mvdz_writer_abort(w), MVDZ_OK);
         assert_eq!(mvdz_writer_abort(w), MVDZ_E_INVALID);
         assert!(mvdz::decompress(&sink.0, 1).is_err());
+    }
+}
+
+/// Extension metadata set on a streaming writer: a later value replaces an
+/// earlier one, and a refused key leaves the writer working.
+#[test]
+fn writer_ext() {
+    let src = src();
+    let mut w = mvdz::Writer::new(Vec::new(), &cfg(Level::Fast, 50_000)).unwrap();
+    w.set_ext("source", b"first").unwrap();
+    w.write_demo(&src[..src.len() / 2]).unwrap();
+    w.set_ext("match", b"42").unwrap();
+    w.set_ext("source", b"mvdsv").unwrap();
+    let big = vec![b'x'; 1 << 20];
+    assert!(matches!(
+        w.set_ext("big", &big),
+        Err(mvdz::Error::Invalid(_))
+    ));
+    w.write_demo(&src[src.len() / 2..]).unwrap();
+    let out = w.finish().unwrap();
+    assert_eq!(mvdz::decompress(&out, 1).unwrap(), src);
+    let m = mvdz::read_metadata(Cursor::new(&out)).unwrap().meta;
+    assert_eq!(
+        m.ext,
+        vec![
+            ("source".to_string(), b"mvdsv".to_vec()),
+            ("match".to_string(), b"42".to_vec())
+        ]
+    );
+    // through the C interface
+    unsafe {
+        let mut sink = (Vec::<u8>::new(), 0usize);
+        let mut err = 0;
+        let w = mvdz_writer_open(
+            Some(w_cb),
+            &mut sink as *mut _ as *mut _,
+            1,
+            50_000,
+            1,
+            &mut err,
+        );
+        let v = b"hub";
+        assert_eq!(
+            mvdz_writer_set_ext(w, c"source".as_ptr(), v.as_ptr() as *const _, v.len()),
+            MVDZ_OK
+        );
+        assert_eq!(
+            mvdz_writer_set_ext(w, c"big".as_ptr(), big.as_ptr() as *const _, big.len()),
+            MVDZ_E_INVALID
+        );
+        assert_eq!(
+            mvdz_writer_set_ext(w, std::ptr::null(), v.as_ptr() as *const _, 3),
+            MVDZ_E_INVALID
+        );
+        assert_eq!(
+            mvdz_writer_write(w, src.as_ptr() as *const _, src.len()),
+            MVDZ_OK
+        );
+        assert_eq!(mvdz_writer_finish(w), MVDZ_OK);
+        let m = mvdz::read_metadata(Cursor::new(&sink.0)).unwrap().meta;
+        assert_eq!(m.ext, vec![("source".to_string(), b"hub".to_vec())]);
+        assert_eq!(mvdz::decompress(&sink.0, 1).unwrap(), src);
     }
 }

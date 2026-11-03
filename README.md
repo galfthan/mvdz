@@ -31,6 +31,16 @@ entropy-coded: static rANS with per-context tables at the **normal** level
 (the default), or zstd at the **fast** level. Anything that does not parse
 is stored raw, so any input round-trips.
 
+## What reads .mvdz today?
+
+The `mvdz` command-line tool, the Rust library, the C library and the
+WebAssembly build. **No QuakeWorld client plays `.mvdz` files yet**: to
+watch one, decompress it to `.mvd` first (`mvdz decompress game.mvdz
+game.mvd`). A client or demo player can add support through the C
+library ([C](#c)): decode at load time, which takes about 0.3 to 0.5 s for
+a 4on4 demo, or, for a segmented file, decode segment by segment through
+its own file system callbacks as it plays.
+
 ## Install and build
 
 **Linux binaries.** Each release on GitHub has static Linux binaries
@@ -65,12 +75,33 @@ mvdz decompress game.mvdz game.mvd
 mvdz info game.mvdz | jq .sha256             # metadata, without decoding
 ```
 
+### Segments: one, or `-s 1M`
+
+A file holds the demo in one or more independently decodable segments.
+
+* **One segment** (the default of `mvdz compress` and of the one-shot
+  library and C calls): the smallest file. It cannot seek, and a reader
+  gets no demo bytes until the whole demo has been decoded. Right for
+  archives and downloads that are decompressed whole.
+* **`-s 1M`** (about 1 MiB of raw demo per segment): about 2 to 4 % larger
+  ([BENCHMARKS.md](BENCHMARKS.md)). A reader can seek by demo time to the
+  start of any segment, delivers the first bytes after one segment has
+  decoded, and can decode segments in parallel. Use it for files that
+  will be played, streamed or seeked into.
+
+The streaming writer (Rust `Writer`, C `mvdz_writer_*`), which records a
+demo as it grows, always cuts segments, because it writes each one as it
+fills: its default is 1 MiB. So the two defaults differ on purpose, each
+the best choice for its use: one-shot compression of a finished demo
+optimises size, a recording must cut. Pass a segment size explicitly to
+either to get the other behaviour.
+
 ## Ratios and speeds
 
 Sizes: on a 72 GB archive of gzip-compressed demos (about 112 GB raw),
 measured on an independent stratified sample of 585 demos, with 95 %
 intervals. Speeds: the default (portable) release build, one core of a
-4-core x86-64 VM, on 40 random demos (140 MB raw), CLI one process per
+4-core x86-64 VM, on 40 demos (sample40, 140 MB raw), CLI one process per
 file. Method, samples, per-era ratios, more speeds and builds with
 `-C target-cpu=native` (faster) are in [BENCHMARKS.md](BENCHMARKS.md).
 
@@ -78,9 +109,14 @@ file. Method, samples, per-era ratios, more speeds and builds with
 |---|---|---|---|
 | mvdz normal | 0.211 [0.206-0.217] | 23 MB/s | 29 MB/s |
 | mvdz fast | 0.242 [0.237-0.249] | 35 MB/s | 47 MB/s |
-| gzip -6 | 0.64 | 88 MB/s | |
-| xz -9 | 0.47 | 28 MB/s | |
+| gzip (the archive's files) | 0.64 | 88 MB/s | |
+| xz -9e | 0.47 | 28 MB/s | |
 | zstd -19 | 0.55 | 118 MB/s | |
+
+The gzip size is that of the archive's own files (level unknown; `gzip
+-6` gives 0.634 on sample40), and the xz size is `xz -9e` (`xz -9`: 0.468
+on 300 random demos). The decode speeds of those rows are for `gzip -6`
+and `xz -9` files on sample40.
 
 MB = 10^6 bytes of raw demo. The whole archive would take about 23.7 GB
 at the normal level and 27.2 GB at the fast level. Recent demos (2023-26)
@@ -234,7 +270,10 @@ decode may use.
 the interface is [`include/mvdz.h`](include/mvdz.h). Link the static
 library with `-lpthread -ldl -lm`, or the shared one with `-lmvdz` (and
 `LD_LIBRARY_PATH` or an rpath). The release profile keeps debug info for
-profiling; `strip` the libraries for distribution.
+profiling; `strip` the libraries for distribution. The release archives
+carry only the static library; the shared one is built from source and
+has no SONAME (packagers can add one with `RUSTFLAGS="-C
+link-arg=-Wl,-soname,libmvdz.so.1"`).
 
 ```c
 #include "mvdz.h"
@@ -250,13 +289,18 @@ mvdz_close(r);
 
 /* record straight to .mvdz; segment 0 = 1 MiB for the writer */
 mvdz_writer *w = mvdz_writer_open(vfs_write, out, MVDZ_LEVEL_NORMAL, 0, 1, &err);
+mvdz_writer_set_ext(w, "source", "myserver", 8);  /* optional metadata */
 mvdz_writer_write(w, data, len);          /* as the demo is recorded */
 mvdz_writer_finish(w);                     /* or mvdz_writer_abort(w) */
 ```
 
 Handles are ids (a stale handle is an error, not a crash), errors are
-sticky, buffers are freed with `mvdz_free`, and callbacks must return
+sticky, buffers are freed with `mvdz_free` (but the static strings of
+`mvdz_version` and `mvdz_strerror` never are), and callbacks must return
 normally (no `longjmp`) and must not call back into their own handle.
+`mvdz_writer_write` codes each segment on the calling thread when it
+fills, about 0.2 s per MiB at the normal level: a server should feed the
+writer from a recording thread, not from its frame loop.
 Attachments are listed in the JSON of `mvdz_info_json`, read with
 `mvdz_attachment_read` (which needs both read and seek callbacks), and
 filtered into a copy with `mvdz_attachments_export`.
@@ -289,6 +333,32 @@ demos they were made from). Fuzz targets are in `fuzz/` (`cargo +nightly
 fuzz run decode`; also `stream_reader`, `read_metadata`, `attachments`,
 `stream_writer`, `capi`, `compress_rt` and the structure-aware `gen_rt`).
 The feature `scalar` forces the portable code paths (as on wasm).
+
+## FAQ
+
+**Why not just compress the `.mvd` with zstd or xz?** On the same
+stratified sample, `zstd -19` gives 0.553 of raw and `xz -9e` 0.473,
+against 0.211 for mvdz normal: mvdz files are about 2.6 times smaller
+than zstd -19 and 2.2 times smaller than xz ([BENCHMARKS.md](BENCHMARKS.md)).
+A general-purpose compressor sees bytes; mvdz parses the demo, puts each
+field in its own stream and codes positions and angles as residuals
+against predictions. The container also gives seeking by demo time,
+metadata without decoding, the demo's identity hash and attachments.
+
+**What is the licence?** MIT ([LICENSE](LICENSE)), and every dependency is
+permissive (MIT, Apache-2.0 or BSD). MIT code can be linked into GPL
+programs such as the GPL-2 QuakeWorld engines and servers.
+
+**Is the format stable?** Not yet. This is a release candidate: the
+format may change before 1.0, and files written by a release candidate
+are not guaranteed to be readable by 1.0, so keep the original `.mvd`
+files. After 1.0, later additions will use the forward-compatible
+extension points of FORMAT.md (new sections, metadata tags and keys).
+
+**Where do I give feedback?** Open an issue on GitHub
+(<https://github.com/galfthan/mvdz/issues>), for the release, the format
+and the [media attachments proposal](proposals/media-attachments.md)
+alike.
 
 ## Contributing
 
