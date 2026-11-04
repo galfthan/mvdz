@@ -21,6 +21,7 @@ use crate::numeric::NCtx;
 use crate::streams::*;
 use crate::util::{Rd, put_uv};
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 
 pub const SCALE: u32 = 12;
 const T: u32 = 1 << SCALE;
@@ -156,19 +157,50 @@ fn cross_bits(c: &[u32], p: &[u32]) -> f64 {
     b
 }
 
+/// Hasher of the encoder's context maps (16-bit keys; one multiply). The
+/// output does not depend on it: `select` sorts the contexts by (count,
+/// key) before using them, and the other maps are only looked up.
+#[derive(Default)]
+struct CtxHash(u64);
+
+impl Hasher for CtxHash {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, b: &[u8]) {
+        for &x in b {
+            self.write_u32(x as u32);
+        }
+    }
+    fn write_u32(&mut self, i: u32) {
+        let h = (self.0 ^ i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        self.0 = h ^ (h >> 32);
+    }
+}
+
+type CtxMap<V> = HashMap<u32, V, BuildHasherDefault<CtxHash>>;
+
 struct Model {
     alpha: usize,
     steps: u32,
-    ctx_of: HashMap<u32, usize>,
+    ctx_of: CtxMap<usize>,
     tables: Vec<Table>,
 }
 
 pub static TABLE_BITS_PER_SYM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(5);
 const TABLE_BITS_BASE: f64 = 16.0;
 
-fn build_model(syms: &[(u32, u16)], alpha: usize, steps: u32) -> Model {
+/// The contexts with their own table and their counts, and the fallback
+/// table's counts: everything of a model but the quantisation.
+struct Sel {
+    /// (context, counts), in context order
+    own: Vec<(u32, Vec<u32>)>,
+    rest: Vec<u32>,
+}
+
+fn select(syms: &[(u32, u16)], alpha: usize) -> Sel {
     let per_sym = TABLE_BITS_PER_SYM.load(std::sync::atomic::Ordering::Relaxed) as f64;
-    let mut counts: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut counts: CtxMap<Vec<u32>> = CtxMap::default();
     let mut global = vec![0u32; alpha];
     for &(c, s) in syms {
         counts.entry(c).or_insert_with(|| vec![0; alpha])[s as usize] += 1;
@@ -200,27 +232,29 @@ fn build_model(syms: &[(u32, u16)], alpha: usize, steps: u32) -> Model {
             fb = rest;
         }
     }
-    let own_set: std::collections::HashSet<u32> = own.iter().copied().collect();
+    own.sort();
     let mut rest = vec![0u32; alpha];
     for &k in &keys {
-        if !own_set.contains(&k) {
+        if own.binary_search(&k).is_err() {
             for i in 0..alpha {
                 rest[i] += counts[&k][i];
             }
         }
     }
-    own.sort();
-    let mut tables = vec![Table::from_q(
-        rest.iter().map(|&c| qlog(c, steps)).collect(),
-        steps,
-    )];
-    let mut ctx_of = HashMap::new();
-    for (i, &k) in own.iter().enumerate() {
-        tables.push(Table::from_q(
-            counts[&k].iter().map(|&c| qlog(c, steps)).collect(),
-            steps,
-        ));
-        ctx_of.insert(k, i + 1);
+    let own = own
+        .into_iter()
+        .map(|k| (k, counts.remove(&k).expect("counted context")))
+        .collect();
+    Sel { own, rest }
+}
+
+fn model_of(sel: &Sel, alpha: usize, steps: u32) -> Model {
+    let q = |c: &[u32]| -> Vec<u32> { c.iter().map(|&x| qlog(x, steps)).collect() };
+    let mut tables = vec![Table::from_q(q(&sel.rest), steps)];
+    let mut ctx_of = CtxMap::default();
+    for (i, (k, c)) in sel.own.iter().enumerate() {
+        tables.push(Table::from_q(q(c), steps));
+        ctx_of.insert(*k, i + 1);
     }
     Model {
         alpha,
@@ -682,8 +716,9 @@ fn unpack<'a>(b: &'a [u8], alpha: usize, count: usize, budget: &Budget) -> Resul
 /// allowed (the caller then uses another back end).
 fn best_pack(syms: &[(u32, u16)], alpha: usize, extra: &[u8]) -> Option<Vec<u8>> {
     let mut best: Option<Vec<u8>> = None;
+    let sel = select(syms, alpha);
     for steps in [2u32, 4] {
-        let m = build_model(syms, alpha, steps);
+        let m = model_of(&sel, alpha, steps);
         if let Some(p) = pack(&m, syms, extra) {
             if best.as_ref().is_none_or(|b| p.len() < b.len()) {
                 best = Some(p);

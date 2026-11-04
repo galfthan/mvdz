@@ -1907,12 +1907,12 @@ of rule 10).
    not give the input (one-shot: the whole file is decoded and compared;
    streaming: each segment). Otherwise zstd if that is smaller than the
    raw bytes and within the ratio limit, else stored.
-6. **Model building** (`rans.rs:build_model`): counts per context (the low
-   16 bits); a context gets its own table where its entropy plus a table
-   cost (16 + 5 bits per present symbol) beats coding it with the shared
-   fallback table; two passes (the fallback is rebuilt from the contexts
-   that did not get a table); counts are log-quantised (`qlog`) to the
-   nearest `qval`. Appendix A gives the coders.
+6. **Model building** (`rans.rs:select`, `model_of`): counts per context
+   (the low 16 bits); a context gets its own table where its entropy plus
+   a table cost (16 + 5 bits per present symbol) beats coding it with the
+   shared fallback table; two passes (the fallback is rebuilt from the
+   contexts that did not get a table); counts are log-quantised (`qlog`)
+   to the nearest `qval`. Appendix A gives the coders.
 7. **Metadata**: §3 (caps); META is zstd-compressed when that is smaller
    and keeps within the ratio limit. Tag 11 reads the 0x000B block as §3
    says (both forms).

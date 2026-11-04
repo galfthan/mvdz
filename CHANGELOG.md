@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+* **Faster normal-level compression** (encoder only; output byte for byte
+  the same). The encoder's context maps hash their 16-bit keys with one
+  multiply instead of SipHash, and the contexts that get their own table
+  are selected once per stream for both quantisations (`steps` 2 and 4)
+  instead of once each. On set8 (8 demos, 18.9 MB raw, one thread,
+  median of 5 interleaved runs) normal compression goes from 6.15 to
+  7.79 MB/s (about 21 % less time); the fast level and decoding are
+  unchanged.
+
 ## 1.0.0-rc.3
 
 The normal level codes five structural contexts as the spec meant them
