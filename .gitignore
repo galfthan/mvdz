@@ -2,3 +2,4 @@
 /target-*
 *.mvdz
 !tests/vectors/*.mvdz
+/interop/specdec/specdec
