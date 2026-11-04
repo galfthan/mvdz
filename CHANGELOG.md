@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+* **Shared tables for segmented files** (format addition: section
+  `TABLES`, kind 0x86, and back end 3; FORMAT.md §2.6, §8.4, §12 rule 11).
+  A segmented file at the normal level used to carry a model header for
+  every rANS stream in every segment. The one-shot encoder now builds one
+  model per stream from all segments and stores it once, before the first
+  segment; each segment's stream uses it where that is smaller than its
+  own model. Segments stay independently decodable (a reader that seeks
+  reads TABLES once), and the decoder builds each shared model once per
+  file instead of once per segment. `compress -s 1M` at the normal level
+  is 0.213 of raw on the stratified sample instead of 0.219 (the cost of
+  1 MiB segments over one segment falls from 3.8 % to 0.9 %); full-size
+  4on4 demos shrink by 4.6 % at `-s 1M` and 14 % at 64 KiB segments.
+  Whole-file compression, the fast level and the streaming writer are
+  unchanged byte for byte; no tables are built into any decoder. An rc.3
+  reader refuses a file with TABLES (`unknown critical section`). `mvdz
+  info` reports `tables_size`. Speed at `-s 1M`, one thread: decoding is
+  about 11 % faster (each model is built once); compression takes about
+  as long as before and holds every segment's streams until the end, so
+  its peak memory is that of a whole-file compression (167 MB for a 14 MB
+  demo, against 118 MB before and 207 MB for one segment).
+* **Faster model building.** The encoder's context maps use a cheaper
+  hash and count each stream once for both quantisations: whole-file
+  compression at the normal level is about 20 % faster, with the same
+  output.
+
 * **usercmd blocks coded field by field** (format addition, segment flag
   `SF_UCMD`, streams `uc` and `uc.a`; FORMAT.md §6.11, §7.6). mvdsv can
   record every player input as a hidden block (type 1, 23 bytes:

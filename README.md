@@ -87,8 +87,9 @@ A file holds the demo in one or more independently decodable segments.
   library and C calls): the smallest file. It cannot seek, and a reader
   gets no demo bytes until the whole demo has been decoded. Right for
   archives and downloads that are decompressed whole.
-* **`-s 1M`** (about 1 MiB of raw demo per segment): about 2 to 4 % larger
-  ([BENCHMARKS.md](BENCHMARKS.md)). A reader can seek by demo time to the
+* **`-s 1M`** (about 1 MiB of raw demo per segment): about 1 % larger at
+  the normal level, 2 % at the fast level ([BENCHMARKS.md](BENCHMARKS.md));
+  the segments share one set of rANS models, stored once in the file. A reader can seek by demo time to the
   start of any segment, delivers the first bytes after one segment has
   decoded, and can decode segments in parallel. Use it for files that
   will be played, streamed or seeked into.

@@ -56,7 +56,7 @@ demos count for more).
 |---|---|---|
 | mvdz normal | 0.211 [0.206-0.216] | 0.328 [0.320-0.338] |
 | mvdz fast | 0.255 [0.250-0.261] | 0.397 [0.388-0.407] |
-| mvdz normal, `-s 1M` | 0.219 | |
+| mvdz normal, `-s 1M` | 0.213 | |
 | mvdz fast, `-s 1M` | 0.259 | |
 | archive gzip | 0.642 [0.635-0.648] | 1 |
 | gzip -9 | 0.614 | |
@@ -86,9 +86,19 @@ is 114,248 bytes at normal and 84,017 at fast. It is not a cold start on a
 small file: eight copies of the same demo in a row cost normal 2.2 bytes
 per float coordinate, as one copy does, while zstd codes the copies almost
 for free. On the real FTE float-coordinate vector (`float-fte`) normal is
-the smaller (0.411 against 0.450 of raw). Segmenting costs about +2 to +4 %
-at `-s 1M` (+3.8 % normal, +1.6 % fast; 64 KiB segments: about +29 % on
-sample40).
+the smaller (0.411 against 0.450 of raw). Segmenting costs about +1 to +2 %
+at `-s 1M` (+0.9 % normal, +1.6 % fast). At the normal level the segments
+of a one-shot file share one model per rANS stream, stored once (the
+TABLES section, FORMAT.md §2.6); with a model in every segment, as rc.3
+wrote them and as the streaming writer still does, `-s 1M` cost +3.8 %
+(0.219). On set8 plus three full-size 4on4 demos (58.9 MB raw) shared
+models make `-s 1M` files 3.9 % smaller (0.201 to 0.193 of raw; the
+4on4s 4.6 %) and 64 KiB files 13.9 % smaller (0.249 to 0.214), for a
+TABLES section of 12 KB (set8) to 32 KB (the 4on4s) per file at 1 MiB.
+At `-s 1M`, one thread (median of 3 interleaved rounds, idle machine):
+library decode 23.9 to 26.6 MB/s and compression 5.3 to 5.0 MB/s on those
+11 demos; a 14 MB 4on4 compresses in 2.75 s (2.78 s before) with a peak
+of 167 MB (118 MB before; one segment: 207 MB).
 
 **By era** (year of the demo; byte-weighted, archive-weighted, 95 %
 intervals; the 9 demos before 2007 are merged into the first group):
@@ -246,6 +256,8 @@ conformance decoder and fuzzing.
 | pure-Rust zstd decoder (as on wasm) | 40 | 2 | 80 | 0 |
 | rc.3 (contexts, zstd levels): holdout | 200 | normal, fast | 400 | 0 |
 | rc.3: stratified, compression self-check | 585 | normal, fast, both at `-s 1M` | 2,340 | 0 |
+| shared tables: stratified, compression self-check | 585 | normal `-s 1M` | 585 | 0 |
+| shared tables: set8 and three 4on4 demos, decoded by the library and the Go conformance decoder | 11 | normal at `-s 64K` and `-s 1M` | 44 | 0 |
 
 No segment of a real demo fell back to raw storage in any campaign.
 
