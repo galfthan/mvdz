@@ -506,6 +506,102 @@ fn hostile(v: &mut Vec<Vector>) {
         build(0, true, &so, true),
         "a usercmd block whose grid flags symbol is 9 (stored streams)",
     );
+    // TABLES (FORMAT.md §2.6): from a segmented duel whose first sections
+    // are META, TABLES, SEGMENT...
+    if let Some(duel) = duel() {
+        let tc = mvdz::compress(&duel, &c(Level::Normal, 65536)).unwrap();
+        let st = sections(&tc);
+        assert_eq!(st[1].0, K_TABLES, "a segmented normal file has TABLES");
+        let ents = tables_entries(&st[1].1);
+        let mut d1 = st.clone();
+        d1.insert(2, st[1].clone());
+        add(
+            "tables-dup",
+            build(0, true, &d1, true),
+            "a second TABLES section after the first",
+        );
+        let mut d2 = st.clone();
+        let t = d2.remove(1);
+        d2.insert(2, t);
+        add(
+            "tables-after-segment",
+            build(0, true, &d2, true),
+            "the TABLES section after the first SEGMENT",
+        );
+        let mut d3 = st.clone();
+        d3[1].0 = 0x06;
+        add(
+            "tables-missing",
+            build(0, true, &d3, true),
+            "the TABLES section's kind changed to an unknown non-critical kind: segments name back end 3 without a model",
+        );
+        let mut e4 = ents.clone();
+        e4.swap(0, 1);
+        let mut d4 = st.clone();
+        d4[1].1 = tables_body(&e4);
+        add(
+            "tables-order",
+            build(0, true, &d4, true),
+            "two TABLES entries swapped (stream ids not increasing)",
+        );
+        let mut e5 = ents.clone();
+        e5[0].1.push(0);
+        let mut d5 = st.clone();
+        d5[1].1 = tables_body(&e5);
+        add(
+            "tables-padding",
+            build(0, true, &d5, true),
+            "a TABLES model with one byte of padding (not consumed exactly)",
+        );
+        // a structural stream's model under a numeric stream's id
+        let lazy = ents.iter().find(|e| mvdz::streams::is_lazy(e.0)).unwrap();
+        let num = ents
+            .iter()
+            .position(|e| mvdz::streams::is_num(e.0))
+            .unwrap();
+        let mut e6 = ents.clone();
+        e6[num].1 = lazy.1.clone();
+        let mut d6 = st.clone();
+        d6[1].1 = tables_body(&e6);
+        add(
+            "tables-alphabet",
+            build(0, true, &d6, true),
+            "a numeric stream's TABLES entry holding a structural model (alphabet 256)",
+        );
+        let amp = amplifying_model(2000);
+        let mut r = mvdz::util::Rd::new(&amp);
+        let hdr = r.bytes().unwrap().to_vec();
+        let mut e7 = ents.clone();
+        e7[0].1 = hdr;
+        let mut d7 = st.clone();
+        d7[1].1 = tables_body(&e7);
+        add(
+            "tables-decisions",
+            build(0, true, &d7, true),
+            "a TABLES model breaking the decision limit (rule M2)",
+        );
+    }
+}
+
+/// The entries (stream id, model) of a TABLES body.
+fn tables_entries(b: &[u8]) -> Vec<(usize, Vec<u8>)> {
+    let mut r = mvdz::util::Rd::new(b);
+    let n = r.uz().unwrap();
+    (0..n)
+        .map(|_| (r.uz().unwrap(), r.bytes().unwrap().to_vec()))
+        .collect()
+}
+
+/// A TABLES body from its entries.
+fn tables_body(e: &[(usize, Vec<u8>)]) -> Vec<u8> {
+    let mut b = Vec::new();
+    put_uv(&mut b, e.len() as u64);
+    for (sid, m) in e {
+        put_uv(&mut b, *sid as u64);
+        put_uv(&mut b, m.len() as u64);
+        b.extend_from_slice(m);
+    }
+    b
 }
 
 /// The raw fields of a META.

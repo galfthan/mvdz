@@ -168,6 +168,8 @@ pub struct FileInfo {
     pub attachments: Vec<AttachInfo>,
     /// compressed file size
     pub file_size: u64,
+    /// bytes of the TABLES section body (0: none; FORMAT.md §2.6)
+    pub tables_size: u64,
 }
 
 fn file_info(lay: crate::format::Layout, file_size: u64) -> FileInfo {
@@ -175,6 +177,7 @@ fn file_info(lay: crate::format::Layout, file_size: u64) -> FileInfo {
         flags: lay.flags,
         meta: lay.meta.map(|m| m.1).unwrap_or_default(),
         index: lay.index.map(|i| i.1).unwrap_or_default(),
+        tables_size: lay.tables.as_ref().map_or(0, |t| t.1),
         attachments: lay.adir.map(|a| a.1).unwrap_or_default(),
         file_size,
     }
@@ -232,6 +235,7 @@ struct JInfo<'a> {
     version: u8,
     streamed: bool,
     file_size: u64,
+    tables_size: u64,
     bundle_sha256: String,
     sha256: String,
     size: u64,
@@ -326,6 +330,7 @@ impl FileInfo {
             bundle_sha256: hex(&self.bundle_hash()),
             streamed: self.flags & F_STREAMED != 0,
             file_size: self.file_size,
+            tables_size: self.tables_size,
             sha256: hex(&m.sha256),
             size: m.size,
             duration_ms: m.duration_ms,

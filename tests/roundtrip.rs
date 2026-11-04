@@ -346,3 +346,34 @@ fn extension_metadata() {
         Err(mvdz::Error::Invalid(_))
     ));
 }
+
+/// Shared tables (TABLES, back end 3): only one-shot segmented files at the
+/// normal level have them; seeking, attachment updates and every reader
+/// keep working.
+#[test]
+fn file_tables() {
+    use mvdz::format::K_TABLES;
+    let src = duel().unwrap_or_else(|| synthetic(&[(1, "{\"a\":"), (0, "1}")], false));
+    let has = |c: &[u8]| sections(c).iter().any(|s| s.0 == K_TABLES);
+    let seg = mvdz::compress(&src, &cfg(Level::Normal, 40_000)).unwrap();
+    assert!(has(&seg), "a segmented normal file has TABLES");
+    assert_eq!(sections(&seg)[1].0, K_TABLES, "TABLES right after META");
+    for c in [
+        mvdz::compress(&src, &cfg(Level::Normal, 0)).unwrap(),
+        mvdz::compress(&src, &cfg(Level::Fast, 40_000)).unwrap(),
+        stream(&src, &cfg(Level::Normal, 40_000)),
+    ] {
+        assert!(!has(&c), "whole, fast and streamed files have no TABLES");
+    }
+    let a = mvdz::Attachment {
+        name: "notes.txt".into(),
+        mime: "text/plain".into(),
+        kv: vec![],
+        data: b"note ".repeat(100),
+    };
+    let with = mvdz::update_attachments_bytes(&seg, &[], &[a]).unwrap();
+    assert!(has(&with));
+    assert!(readers_agree(&with, "tables + attachment").unwrap() == src);
+    let without = mvdz::update_attachments_bytes(&with, &["notes.txt"], &[]).unwrap();
+    assert!(without == seg, "removing the attachment restores the file");
+}

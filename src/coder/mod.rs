@@ -5,6 +5,7 @@
 //! | 0  | store | bytes                    | zigzag LEB128                      | bytes        |
 //! | 1  | zstd  | zstd of the bytes        | zstd of the LEB128 bytes           | zstd         |
 //! | 2  | rans  | static rANS, ctx tables  | static rANS bucket + mantissa bits | (not allowed)|
+//! | 3  | rans-file | rANS, the file's tables | rANS, the file's tables       | (not allowed)|
 
 pub mod rans;
 pub mod rc;
@@ -12,12 +13,23 @@ pub mod rc;
 use crate::budget::Budget;
 use crate::error::{Error, Result};
 use crate::numeric::NCtx;
+use rans::{DModel, FileTables};
 use std::borrow::Cow;
+use std::sync::Arc;
+
+/// The file model of a back end 3 stream; a stream naming back end 3
+/// without one is corrupt.
+pub fn file_model(ft: Option<&FileTables>, sid: usize) -> Result<&Arc<DModel>> {
+    ft.and_then(|t| t.get(sid))
+        .ok_or(Error::Corrupt("no file table for the stream"))
+}
 
 pub const BE_STORE: u8 = 0;
 pub const BE_ZSTD: u8 = 1;
 pub const BE_RANS: u8 = 2;
-pub const BE_NAMES: [&str; 3] = ["store", "zstd", "rans"];
+/// rANS with the model from the file's TABLES section.
+pub const BE_FILE: u8 = 3;
+pub const BE_NAMES: [&str; 4] = ["store", "zstd", "rans", "rans-file"];
 
 #[inline]
 pub fn zigzag(v: i32) -> u32 {
@@ -113,13 +125,25 @@ pub enum LazyDec<'a> {
 }
 
 impl<'a> LazyDec<'a> {
-    pub fn new(be: u8, body: &'a [u8], n: usize, budget: &Budget) -> Result<LazyDec<'a>> {
+    pub fn new(
+        be: u8,
+        sid: usize,
+        body: &'a [u8],
+        n: usize,
+        ft: Option<&FileTables>,
+        budget: &Budget,
+    ) -> Result<LazyDec<'a>> {
         Ok(match be {
             BE_STORE | BE_ZSTD => LazyDec::Bytes(Cursor {
                 b: decode_blob(be, body, n)?,
                 i: 0,
             }),
             BE_RANS => LazyDec::Rans(Box::new(rans::ByteDec::new(body, n, budget)?)),
+            BE_FILE => LazyDec::Rans(Box::new(rans::ByteDec::new_file(
+                file_model(ft, sid)?,
+                body,
+                n,
+            )?)),
             _ => return Err(Error::Corrupt("back end")),
         })
     }
@@ -156,6 +180,7 @@ impl<'a> NumDec<'a> {
         sid: usize,
         body: &'a [u8],
         n: usize,
+        ft: Option<&FileTables>,
         budget: &Budget,
     ) -> Result<NumDec<'a>> {
         Ok(match be {
@@ -175,6 +200,12 @@ impl<'a> NumDec<'a> {
                 n,
             ),
             BE_RANS => NumDec::Rans(Box::new(rans::NumDec::new(sid, body, n, budget)?)),
+            BE_FILE => NumDec::Rans(Box::new(rans::NumDec::new_file(
+                sid,
+                file_model(ft, sid)?,
+                body,
+                n,
+            )?)),
             _ => return Err(Error::Corrupt("back end")),
         })
     }

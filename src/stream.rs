@@ -189,7 +189,7 @@ impl<W: Write> StreamEncoder<W> {
         if let (Some(b), true) = (&body, self.cfg.verify) {
             let ok = parse_seg_hdr(b).ok().is_some_and(|h| {
                 let mut dst = vec![0u8; seg.len()];
-                decode_segment_share(share, b, &h, &mut dst, 1, &Budget::unlimited()).is_ok()
+                decode_segment_share(share, None, b, &h, &mut dst, 1, &Budget::unlimited()).is_ok()
                     && dst == seg
             });
             if !ok {
@@ -539,6 +539,11 @@ impl<S: Source> Reader<S> {
                 K_INDEX => {
                     let (b, _c) = self.read_body(&s)?;
                     self.lay.index(&s, Index::decode(&b)?)?;
+                }
+                K_TABLES => {
+                    let (b, _c) = self.read_body(&s)?;
+                    let t = crate::coder::rans::FileTables::parse(&b, &self.budget)?;
+                    self.lay.tables(&s, t);
                 }
                 K_ADIR => {
                     let (b, _c) = self.read_body(&s)?;

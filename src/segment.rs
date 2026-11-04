@@ -8,7 +8,8 @@
 //! ```
 
 use crate::budget::Budget;
-use crate::coder::{self, BE_RANS, BE_STORE, BE_ZSTD, LazyDec, NumDec, rans};
+use crate::coder::rans::FileTables;
+use crate::coder::{self, BE_FILE, BE_RANS, BE_STORE, BE_ZSTD, LazyDec, NumDec, rans};
 use crate::error::{Error, Result, bad};
 use crate::numeric::{Buf, Group, NCtx, NumIO, WAVE1, WAVE1_PIPE, WAVE2};
 use crate::proto::{Proto, frame_len};
@@ -416,27 +417,65 @@ fn pack_best(
     unreachable!("store always codes a stream")
 }
 
-/// The transform body of a walked segment; `dinfo_off` is the offset of its
-/// demoinfo share in the metadata store.
-pub fn encode(
-    src: &[u8],
-    wk: &Walked,
-    level: Level,
-    dinfo_off: u64,
-    threads: usize,
-    stats: &mut Vec<StreamStat>,
-) -> Vec<u8> {
-    let groups: Vec<Group> = WAVE1.iter().chain(WAVE2.iter()).copied().collect();
+/// The numeric groups in coding order (wave 1, then wave 2).
+fn groups() -> Vec<Group> {
+    WAVE1.iter().chain(WAVE2.iter()).copied().collect()
+}
+
+/// The numeric values of a walked segment, per group (in [`groups`]
+/// order) and stream of the group.
+pub struct Nums(Vec<Vec<Vec<(NCtx, i32)>>>);
+
+/// Runs the numeric groups of a walked segment (encode direction).
+pub fn numerics(src: &[u8], wk: &Walked, threads: usize) -> Nums {
+    let groups = groups();
     let buf = Buf::ro(src);
     let recs = &wk.recs;
-    let nums: Vec<Vec<Vec<(NCtx, i32)>>> = par_map(threads, groups.len(), |gi| {
+    Nums(par_map(threads, groups.len(), |gi| {
         let g = groups[gi];
         let mut io = NumEnc {
             vals: g.streams().iter().map(|_| Vec::new()).collect(),
         };
         g.run::<true, NumEnc>(recs, buf, &mut io);
         io.vals
-    });
+    }))
+}
+
+/// One coded stream of a segment.
+pub struct Coded {
+    sid: usize,
+    count: usize,
+    /// the segment's own coding: back end and body
+    own: (u8, Vec<u8>),
+    /// the body coded with the file's shared model (back end 3), when the
+    /// file has one for the stream that codes every symbol of it
+    file: Option<Vec<u8>>,
+}
+
+impl Coded {
+    /// Bytes back end 3 saves over the own coding in this segment.
+    fn saving(&self) -> usize {
+        self.file
+            .as_ref()
+            .map_or(0, |f| self.own.1.len().saturating_sub(f.len()))
+    }
+}
+
+/// Shared models of a file, by stream id (None: no shared model).
+pub type SharedSet = Vec<Option<rans::Shared>>;
+
+/// Codes every non-empty stream of a walked segment, in stream id order.
+/// With `shared`, the rANS streams that have a shared model are also coded
+/// with it (normal level).
+pub fn code_streams(
+    wk: &Walked,
+    nums: &Nums,
+    level: Level,
+    shared: Option<&SharedSet>,
+    threads: usize,
+) -> Vec<Coded> {
+    let groups = groups();
+    let nums = &nums.0;
     // every non-empty stream is a job: (sid, kind, group, index in group)
     let mut jobs: Vec<(usize, Kind, usize, usize)> = Vec::new();
     for sid in 0..N_LAZY {
@@ -456,33 +495,161 @@ pub fn encode(
             jobs.push((sid, Kind::Blob, 0, 0));
         }
     }
-    let size = |j: &(usize, Kind, usize, usize)| match j.1 {
+    let count = |j: &(usize, Kind, usize, usize)| match j.1 {
         Kind::Lazy => wk.io.syms[j.0].len(),
-        Kind::Num => nums[j.2][j.3].len() * 2,
+        Kind::Num => nums[j.2][j.3].len(),
         Kind::Blob => wk.io.blobs[j.0].len(),
+    };
+    let size = |j: &(usize, Kind, usize, usize)| match j.1 {
+        Kind::Num => 2 * count(j),
+        _ => count(j),
     };
     // biggest first for load balance; output in stream id order
     let mut order: Vec<usize> = (0..jobs.len()).collect();
     order.sort_by_key(|&i| std::cmp::Reverse(size(&jobs[i])));
-    let packed_sorted = par_map(threads, jobs.len(), |k| {
-        let (sid, kind, gi, i) = jobs[order[k]];
+    let coded_sorted = par_map(threads, jobs.len(), |k| {
+        let j = jobs[order[k]];
+        let (sid, kind, gi, i) = j;
         let num: &[(NCtx, i32)] = if matches!(kind, Kind::Num) {
             &nums[gi][i]
         } else {
             &[]
         };
-        pack_best(kind, sid, level, wk, num)
+        let own = pack_best(kind, sid, level, wk, num);
+        let sh = shared.and_then(|s| s[sid].as_ref());
+        let file = match (level, kind, sh) {
+            (Level::Normal, Kind::Lazy, Some(sh)) => {
+                rans::encode_bytes_shared(sh, &wk.io.syms[sid], &wk.io.ctxs[sid])
+            }
+            (Level::Normal, Kind::Num, Some(sh)) => rans::encode_num_shared(sh, sid, num),
+            _ => None,
+        };
+        Coded {
+            sid,
+            count: count(&j),
+            own,
+            file,
+        }
     });
-    let mut packed: Vec<Option<(u8, Vec<u8>)>> = (0..jobs.len()).map(|_| None).collect();
-    for (k, p) in packed_sorted.into_iter().enumerate() {
-        packed[order[k]] = Some(p);
+    let mut coded: Vec<Option<Coded>> = (0..jobs.len()).map(|_| None).collect();
+    for (k, c) in coded_sorted.into_iter().enumerate() {
+        coded[order[k]] = Some(c);
     }
-    let mut ids: Vec<usize> = (0..jobs.len()).collect();
-    ids.sort_by_key(|&i| jobs[i].0);
-    let count = |i: usize| match jobs[i].1 {
-        Kind::Lazy => wk.io.syms[jobs[i].0].len(),
-        Kind::Num => nums[jobs[i].2][jobs[i].3].len(),
-        Kind::Blob => wk.io.blobs[jobs[i].0].len(),
+    let mut coded: Vec<Coded> = coded.into_iter().map(|c| c.expect("coded")).collect();
+    coded.sort_by_key(|c| c.sid);
+    coded
+}
+
+/// Trains the shared models of a file on its walked segments: one per
+/// rANS stream (structural and numeric) that has symbols, from its symbols
+/// in every segment (FORMAT.md §12).
+pub fn train(segs: &[(&Walked, &Nums)], threads: usize) -> SharedSet {
+    let groups = groups();
+    // (sid, group and index of a numeric stream), with its total count
+    let mut cand: Vec<(usize, Option<(usize, usize)>, usize)> = Vec::new();
+    for sid in 0..N_LAZY {
+        let n: usize = segs.iter().map(|(w, _)| w.io.syms[sid].len()).sum();
+        if n > 0 {
+            cand.push((sid, None, n));
+        }
+    }
+    for (gi, g) in groups.iter().enumerate() {
+        for (k, &sid) in g.streams().iter().enumerate() {
+            let n: usize = segs.iter().map(|(_, v)| v.0[gi][k].len()).sum();
+            if n > 0 {
+                cand.push((sid, Some((gi, k)), n));
+            }
+        }
+    }
+    cand.sort_by_key(|c| std::cmp::Reverse(c.2));
+    let models = par_map(threads, cand.len(), |i| match cand[i] {
+        (sid, None, _) => {
+            let v: Vec<(&[u8], &[u32])> = segs
+                .iter()
+                .map(|(w, _)| (&w.io.syms[sid][..], &w.io.ctxs[sid][..]))
+                .collect();
+            rans::shared_bytes(&v)
+        }
+        (sid, Some((gi, k)), _) => {
+            let v: Vec<&[(NCtx, i32)]> = segs.iter().map(|(_, n)| &n.0[gi][k][..]).collect();
+            rans::shared_num(sid, &v)
+        }
+    });
+    let mut set: SharedSet = (0..N_STREAMS).map(|_| None).collect();
+    for (i, m) in models.into_iter().enumerate() {
+        set[cand[i].0] = m;
+    }
+    set
+}
+
+/// Which shared models the file keeps: a stream's model goes into the
+/// TABLES section when the bytes it saves over all segments exceed what
+/// its entry costs; none at all when the section would not pay for its
+/// own header (an empty result: no TABLES section).
+pub fn choose_shared(shared: &SharedSet, coded: &[&[Coded]]) -> Vec<bool> {
+    let mut save = vec![0usize; N_STREAMS];
+    for cs in coded {
+        for c in cs.iter() {
+            save[c.sid] += c.saving();
+        }
+    }
+    let mut keep = vec![false; N_STREAMS];
+    let (mut net, mut n) = (0usize, 0u64);
+    for sid in 0..N_STREAMS {
+        if let Some(sh) = &shared[sid] {
+            let cost = uv_len(sid as u64) + uv_len(sh.hdr().len() as u64) + sh.hdr().len();
+            if save[sid] > cost {
+                keep[sid] = true;
+                net += save[sid] - cost;
+                n += 1;
+            }
+        }
+    }
+    // the section header (kind, length) and the entry count
+    if n == 0 || net <= 9 + uv_len(n) {
+        return Vec::new();
+    }
+    keep
+}
+
+/// The TABLES section body of the models `keep` selects (FORMAT.md §2.6).
+pub fn tables_body(shared: &SharedSet, keep: &[bool]) -> Vec<u8> {
+    let ids: Vec<usize> = (0..keep.len()).filter(|&s| keep[s]).collect();
+    let mut out = Vec::new();
+    put_uv(&mut out, ids.len() as u64);
+    for sid in ids {
+        let h = shared[sid].as_ref().expect("kept model").hdr();
+        put_uv(&mut out, sid as u64);
+        put_uv(&mut out, h.len() as u64);
+        out.extend_from_slice(h);
+    }
+    out
+}
+
+fn uv_len(v: u64) -> usize {
+    let mut b = Vec::new();
+    put_uv(&mut b, v);
+    b.len()
+}
+
+/// The transform body of a walked segment from its coded streams. A
+/// stream whose model the file keeps (`keep[sid]`) uses back end 3 where
+/// that is smaller than its own coding. `dinfo_off` is the offset of the
+/// segment's demoinfo share in the metadata store.
+pub fn body(
+    wk: &Walked,
+    coded: &[Coded],
+    keep: &[bool],
+    dinfo_off: u64,
+    stats: &mut Vec<StreamStat>,
+) -> Vec<u8> {
+    let pick = |c: &Coded| -> (u8, usize) {
+        match &c.file {
+            Some(f) if keep.get(c.sid) == Some(&true) && f.len() < c.own.1.len() => {
+                (BE_FILE, f.len())
+            }
+            _ => (c.own.0, c.own.1.len()),
+        }
     };
     // the flag only when the segment has demoinfo blocks: without any,
     // the walk is the same either way and needs no metadata
@@ -497,24 +664,42 @@ pub fn encode(
     put_uv(&mut out, wk.proto0.fte2 as u64);
     put_uv(&mut out, wk.proto0.mvd1 as u64);
     put_uv(&mut out, wk.tail as u64);
-    put_uv(&mut out, ids.len() as u64);
-    for &i in &ids {
-        let (be, body) = packed[i].as_ref().expect("packed");
-        put_uv(&mut out, jobs[i].0 as u64);
-        put_uv(&mut out, *be as u64);
-        put_uv(&mut out, count(i) as u64);
-        put_uv(&mut out, body.len() as u64);
+    put_uv(&mut out, coded.len() as u64);
+    for c in coded {
+        let (be, len) = pick(c);
+        put_uv(&mut out, c.sid as u64);
+        put_uv(&mut out, be as u64);
+        put_uv(&mut out, c.count as u64);
+        put_uv(&mut out, len as u64);
         stats.push(StreamStat {
-            id: jobs[i].0,
-            be: *be,
-            count: count(i),
-            packed: body.len(),
+            id: c.sid,
+            be,
+            count: c.count,
+            packed: len,
         });
     }
-    for &i in &ids {
-        out.extend_from_slice(&packed[i].as_ref().expect("packed").1);
+    for c in coded {
+        match pick(c).0 {
+            BE_FILE => out.extend_from_slice(c.file.as_ref().expect("file body")),
+            _ => out.extend_from_slice(&c.own.1),
+        }
     }
     out
+}
+
+/// The transform body of a walked segment with per-segment tables only;
+/// `dinfo_off` is the offset of its demoinfo share in the metadata store.
+pub fn encode(
+    src: &[u8],
+    wk: &Walked,
+    level: Level,
+    dinfo_off: u64,
+    threads: usize,
+    stats: &mut Vec<StreamStat>,
+) -> Vec<u8> {
+    let nums = numerics(src, wk, threads);
+    let coded = code_streams(wk, &nums, level, None, threads);
+    body(wk, &coded, &[], dinfo_off, stats)
 }
 
 /// Cut points: frame boundaries about every `seg` bytes (0: one segment).
@@ -600,7 +785,7 @@ pub fn parse_header(body: &[u8], raw_len: usize) -> Result<Header> {
         let ok_be = if is_blob(id) {
             be == BE_STORE as u64 || be == BE_ZSTD as u64
         } else {
-            be <= BE_RANS as u64
+            be <= BE_FILE as u64
         };
         if !ok_be {
             return bad("stream back end");
@@ -638,6 +823,7 @@ pub fn decode(
     h: &Header,
     dst: &mut [u8],
     dinfo: &[u8],
+    ft: Option<&FileTables>,
     threads: usize,
     budget: &Budget,
 ) -> Result<()> {
@@ -705,14 +891,18 @@ pub fn decode(
         let all_rans = g
             .streams()
             .iter()
-            .all(|&sid| num_ents[sid].is_none_or(|e| e.0 == BE_RANS));
+            .all(|&sid| num_ents[sid].is_none_or(|e| e.0 == BE_RANS || e.0 == BE_FILE));
         if all_rans {
-            run_group(g, &recs, buf, &num_ents, |_, sid, b, c| {
-                rans::NumDec::new(sid, b, c, budget)
+            run_group(g, &recs, buf, &num_ents, |be, sid, b, c| {
+                if be == BE_FILE {
+                    rans::NumDec::new_file(sid, coder::file_model(ft, sid)?, b, c)
+                } else {
+                    rans::NumDec::new(sid, b, c, budget)
+                }
             })
         } else {
             run_group(g, &recs, buf, &num_ents, |be, sid, b, c| {
-                NumDec::new(be, sid, b, c, budget)
+                NumDec::new(be, sid, b, c, ft, budget)
             })
         }
     };
@@ -726,11 +916,18 @@ pub fn decode(
             .map_err(|_| Error::Internal("lock"))?
             .take()
             .ok_or(Error::Internal("walk"))?;
-        if lazy_ents.iter().all(|e| e.is_none_or(|e| e.0 == BE_RANS)) {
+        if lazy_ents
+            .iter()
+            .all(|e| e.is_none_or(|e| e.0 == BE_RANS || e.0 == BE_FILE))
+        {
             let mut lazy: [rans::ByteDec; N_LAZY] = std::array::from_fn(|_| rans::ByteDec::empty());
             for (id, e) in lazy_ents.iter().enumerate() {
-                if let Some((_, b, c)) = *e {
-                    lazy[id] = rans::ByteDec::new(b, c, budget)?;
+                if let Some((be, b, c)) = *e {
+                    lazy[id] = if be == BE_FILE {
+                        rans::ByteDec::new_file(coder::file_model(ft, id)?, b, c)?
+                    } else {
+                        rans::ByteDec::new(b, c, budget)?
+                    };
                 }
             }
             walk_dec(lazy, blobs, buf, &recs, h.proto, h.tail, dinfo_on, ucmd_on)
@@ -738,7 +935,7 @@ pub fn decode(
             let mut lazy: [LazyDec; N_LAZY] = std::array::from_fn(|_| LazyDec::Empty);
             for (id, e) in lazy_ents.iter().enumerate() {
                 if let Some((be, b, c)) = *e {
-                    lazy[id] = LazyDec::new(be, b, c, budget)?;
+                    lazy[id] = LazyDec::new(be, id, b, c, ft, budget)?;
                 }
             }
             walk_dec(lazy, blobs, buf, &recs, h.proto, h.tail, dinfo_on, ucmd_on)
@@ -849,7 +1046,16 @@ mod tests {
                 let body = encode(&src, &wk, level, 0, 1, &mut st);
                 let h = parse_header(&body, src.len()).unwrap();
                 let mut dst = vec![0u8; src.len()];
-                decode(&body, &h, &mut dst, &[], threads, &Budget::unlimited()).unwrap();
+                decode(
+                    &body,
+                    &h,
+                    &mut dst,
+                    &[],
+                    None,
+                    threads,
+                    &Budget::unlimited(),
+                )
+                .unwrap();
                 assert!(dst == src, "{level:?} {threads}");
             }
         }
@@ -906,7 +1112,16 @@ mod tests {
                 let h = parse_header(&body, src.len()).unwrap();
                 assert_eq!(h.flags, SF_UCMD);
                 let mut dst = vec![0u8; src.len()];
-                decode(&body, &h, &mut dst, &[], threads, &Budget::unlimited()).unwrap();
+                decode(
+                    &body,
+                    &h,
+                    &mut dst,
+                    &[],
+                    None,
+                    threads,
+                    &Budget::unlimited(),
+                )
+                .unwrap();
                 assert!(dst == src, "{level:?} {threads}");
             }
         }

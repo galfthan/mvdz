@@ -21,6 +21,8 @@ use crate::numeric::NCtx;
 use crate::streams::*;
 use crate::util::{Rd, put_uv};
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
+use std::sync::{Arc, OnceLock};
 
 pub const SCALE: u32 = 12;
 const T: u32 = 1 << SCALE;
@@ -156,19 +158,50 @@ fn cross_bits(c: &[u32], p: &[u32]) -> f64 {
     b
 }
 
+/// Hasher of the encoder's context maps (16-bit keys; one multiply). The
+/// maps are only looked up, never iterated in hash order, so the output
+/// does not depend on it.
+#[derive(Default)]
+struct CtxHash(u64);
+
+impl Hasher for CtxHash {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, b: &[u8]) {
+        for &x in b {
+            self.write_u32(x as u32);
+        }
+    }
+    fn write_u32(&mut self, i: u32) {
+        let h = (self.0 ^ i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        self.0 = h ^ (h >> 32);
+    }
+}
+
+type CtxMap<V> = HashMap<u32, V, BuildHasherDefault<CtxHash>>;
+
 struct Model {
     alpha: usize,
     steps: u32,
-    ctx_of: HashMap<u32, usize>,
+    ctx_of: CtxMap<usize>,
     tables: Vec<Table>,
 }
 
 pub static TABLE_BITS_PER_SYM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(5);
 const TABLE_BITS_BASE: f64 = 16.0;
 
-fn build_model(syms: &[(u32, u16)], alpha: usize, steps: u32) -> Model {
+/// The contexts with their own table and their counts, and the fallback
+/// table's counts: everything of a model but the quantisation.
+struct Sel {
+    /// (context, counts), in context order
+    own: Vec<(u32, Vec<u32>)>,
+    rest: Vec<u32>,
+}
+
+fn select(syms: &[(u32, u16)], alpha: usize) -> Sel {
     let per_sym = TABLE_BITS_PER_SYM.load(std::sync::atomic::Ordering::Relaxed) as f64;
-    let mut counts: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut counts: CtxMap<Vec<u32>> = CtxMap::default();
     let mut global = vec![0u32; alpha];
     for &(c, s) in syms {
         counts.entry(c).or_insert_with(|| vec![0; alpha])[s as usize] += 1;
@@ -200,27 +233,32 @@ fn build_model(syms: &[(u32, u16)], alpha: usize, steps: u32) -> Model {
             fb = rest;
         }
     }
-    let own_set: std::collections::HashSet<u32> = own.iter().copied().collect();
+    own.sort();
     let mut rest = vec![0u32; alpha];
     for &k in &keys {
-        if !own_set.contains(&k) {
+        if own.binary_search(&k).is_err() {
             for i in 0..alpha {
                 rest[i] += counts[&k][i];
             }
         }
     }
-    own.sort();
-    let mut tables = vec![Table::from_q(
-        rest.iter().map(|&c| qlog(c, steps)).collect(),
-        steps,
-    )];
-    let mut ctx_of = HashMap::new();
-    for (i, &k) in own.iter().enumerate() {
-        tables.push(Table::from_q(
-            counts[&k].iter().map(|&c| qlog(c, steps)).collect(),
-            steps,
-        ));
-        ctx_of.insert(k, i + 1);
+    let own = own
+        .into_iter()
+        .map(|k| {
+            let c = counts.remove(&k).expect("counted context");
+            (k, c)
+        })
+        .collect();
+    Sel { own, rest }
+}
+
+fn model_of(sel: &Sel, alpha: usize, steps: u32) -> Model {
+    let q = |c: &[u32]| -> Vec<u32> { c.iter().map(|&x| qlog(x, steps)).collect() };
+    let mut tables = vec![Table::from_q(q(&sel.rest), steps)];
+    let mut ctx_of = CtxMap::default();
+    for (i, (k, c)) in sel.own.iter().enumerate() {
+        tables.push(Table::from_q(q(c), steps));
+        ctx_of.insert(*k, i + 1);
     }
     Model {
         alpha,
@@ -293,7 +331,7 @@ pub const DEC_BASE: u64 = 1024;
 /// Decoder-side model. A search table at pool offset o is
 /// `[0, c1, .., cn = T, pad..]` (16*chunks + 1 entries) followed by its
 /// 16*chunks symbols, so one table is one or two cache lines.
-pub(crate) struct DModel {
+pub struct DModel {
     map: Vec<u32>,
     fb: u32,
     chunks: usize,
@@ -468,15 +506,20 @@ pub(crate) fn read_model(
 }
 
 impl DModel {
-    fn empty() -> DModel {
-        DModel {
-            map: Vec::new(),
-            fb: E_EMPTY,
-            chunks: 1,
-            pool: Vec::new(),
-            luts: Vec::new(),
-            _charge: None,
-        }
+    /// The model of an absent stream (no symbol can be decoded), shared.
+    fn empty() -> Arc<DModel> {
+        static E: OnceLock<Arc<DModel>> = OnceLock::new();
+        E.get_or_init(|| {
+            Arc::new(DModel {
+                map: Vec::new(),
+                fb: E_EMPTY,
+                chunks: 1,
+                pool: Vec::new(),
+                luts: Vec::new(),
+                _charge: None,
+            })
+        })
+        .clone()
     }
     #[inline(always)]
     fn entry(&self, ctx: u32) -> u32 {
@@ -618,11 +661,18 @@ impl<'a> RDec<'a> {
     }
 }
 
-fn rans_encode(model: &Model, syms: &[(u32, u16)]) -> Vec<u8> {
-    let tix: Vec<usize> = syms
-        .iter()
+/// The table of each symbol's context.
+fn table_ix(model: &Model, syms: &[(u32, u16)]) -> Vec<usize> {
+    syms.iter()
         .map(|(c, _)| model.ctx_of.get(c).copied().unwrap_or(0))
-        .collect();
+        .collect()
+}
+
+fn rans_encode(model: &Model, syms: &[(u32, u16)]) -> Vec<u8> {
+    rans_encode_ix(model, syms, &table_ix(model, syms))
+}
+
+fn rans_encode_ix(model: &Model, syms: &[(u32, u16)], tix: &[usize]) -> Vec<u8> {
     let mut coded = 0usize;
     let mut state_of = vec![0u8; syms.len()];
     for (i, &ti) in tix.iter().enumerate() {
@@ -661,7 +711,7 @@ fn pack(model: &Model, syms: &[(u32, u16)], extra: &[u8]) -> Option<Vec<u8>> {
 }
 
 struct Unpacked<'a> {
-    model: DModel,
+    model: Arc<DModel>,
     rans: &'a [u8],
     extra: &'a [u8],
 }
@@ -672,7 +722,7 @@ fn unpack<'a>(b: &'a [u8], alpha: usize, count: usize, budget: &Budget) -> Resul
     let hdr = r.bytes().ok_or(bad)?;
     let rans = r.bytes().ok_or(bad)?;
     Ok(Unpacked {
-        model: read_model(hdr, alpha, count, budget)?,
+        model: Arc::new(read_model(hdr, alpha, count, budget)?),
         rans,
         extra: r.rest(),
     })
@@ -682,8 +732,9 @@ fn unpack<'a>(b: &'a [u8], alpha: usize, count: usize, budget: &Budget) -> Resul
 /// allowed (the caller then uses another back end).
 fn best_pack(syms: &[(u32, u16)], alpha: usize, extra: &[u8]) -> Option<Vec<u8>> {
     let mut best: Option<Vec<u8>> = None;
+    let sel = select(syms, alpha);
     for steps in [2u32, 4] {
-        let m = build_model(syms, alpha, steps);
+        let m = model_of(&sel, alpha, steps);
         if let Some(p) = pack(&m, syms, extra) {
             if best.as_ref().is_none_or(|b| p.len() < b.len()) {
                 best = Some(p);
@@ -693,6 +744,154 @@ fn best_pack(syms: &[(u32, u16)], alpha: usize, extra: &[u8]) -> Option<Vec<u8>>
     best
 }
 
+// --------------------------------------------------------------- file tables
+
+/// A model shared by the segments of a file (the TABLES section, back end
+/// 3): built from one stream's symbols over every segment, its header
+/// stored once per file.
+pub struct Shared {
+    model: Model,
+    hdr: Vec<u8>,
+}
+
+impl Shared {
+    /// The model header, as the TABLES section stores it.
+    pub fn hdr(&self) -> &[u8] {
+        &self.hdr
+    }
+}
+
+/// The smaller of the two quantisations for `syms` (header plus coded
+/// symbols), or None if no model is allowed (rules M1 and M2).
+fn shared_from(syms: &[(u32, u16)], alpha: usize) -> Option<Shared> {
+    let mut best: Option<(usize, Shared)> = None;
+    let sel = select(syms, alpha);
+    for steps in [2u32, 4] {
+        let model = model_of(&sel, alpha, steps);
+        if model.tables.len() > 65536 {
+            continue;
+        }
+        let (hdr, decisions) = write_model(&model);
+        if decisions > (hdr.len() as u64) * DEC_PER_BYTE + DEC_BASE {
+            continue;
+        }
+        let cost = hdr.len() + rans_encode(&model, syms).len();
+        if best.as_ref().is_none_or(|b| cost < b.0) {
+            best = Some((cost, Shared { model, hdr }));
+        }
+    }
+    best.map(|b| b.1)
+}
+
+/// The shared model of a structural stream from its segments' symbols and
+/// contexts.
+pub fn shared_bytes(segs: &[(&[u8], &[u32])]) -> Option<Shared> {
+    let mut v = Vec::with_capacity(segs.iter().map(|s| s.0.len()).sum());
+    for (syms, ctxs) in segs {
+        v.extend(
+            syms.iter()
+                .zip(*ctxs)
+                .map(|(&s, &c)| (byte_ctx(c), s as u16)),
+        );
+    }
+    shared_from(&v, 256)
+}
+
+/// The shared model of numeric stream `sid` from its segments' values.
+pub fn shared_num(sid: usize, segs: &[&[(NCtx, i32)]]) -> Option<Shared> {
+    let mut v = Vec::with_capacity(segs.iter().map(|s| s.len()).sum());
+    for vals in segs {
+        v.extend(vals.iter().map(|(c, x)| (num_ctx(sid, c), bucket(*x).0)));
+    }
+    shared_from(&v, NALPHA)
+}
+
+/// `rans_len uv | rans | extra` with the shared model, or None if a symbol
+/// has no frequency in it.
+fn pack_shared(sh: &Shared, syms: &[(u32, u16)], extra: &[u8]) -> Option<Vec<u8>> {
+    let m = &sh.model;
+    let tix = table_ix(m, syms);
+    for (&(_, s), &ti) in syms.iter().zip(&tix) {
+        if m.tables[ti].freq[s as usize] == 0 {
+            return None;
+        }
+    }
+    let body = rans_encode_ix(m, syms, &tix);
+    let mut out = Vec::with_capacity(body.len() + extra.len() + 4);
+    put_uv(&mut out, body.len() as u64);
+    out.extend_from_slice(&body);
+    out.extend_from_slice(extra);
+    Some(out)
+}
+
+/// A structural stream coded with the file's model (back end 3).
+pub fn encode_bytes_shared(sh: &Shared, syms: &[u8], ctxs: &[u32]) -> Option<Vec<u8>> {
+    pack_shared(sh, &byte_syms(syms, ctxs), &[])
+}
+
+/// A numeric stream coded with the file's model (back end 3).
+pub fn encode_num_shared(sh: &Shared, sid: usize, vals: &[(NCtx, i32)]) -> Option<Vec<u8>> {
+    let (syms, extra) = num_syms(sid, vals);
+    pack_shared(sh, &syms, &extra)
+}
+
+/// The decoder models of a file's TABLES section, read once per file and
+/// shared by every segment (FORMAT.md §2.6).
+pub struct FileTables {
+    m: Vec<Option<Arc<DModel>>>,
+}
+
+impl FileTables {
+    /// Reads a TABLES section body: `n uv | n x { sid uv | len uv |
+    /// model }`, ids strictly increasing, each model consumed exactly.
+    pub fn parse(b: &[u8], budget: &Budget) -> Result<FileTables> {
+        let e = Error::Corrupt("tables");
+        let mut r = Rd::new(b);
+        let n = r.uz().ok_or(e)?;
+        if n == 0 || n > N_STREAMS {
+            return Err(e);
+        }
+        let mut m: Vec<Option<Arc<DModel>>> = (0..N_STREAMS).map(|_| None).collect();
+        let mut prev: Option<usize> = None;
+        for _ in 0..n {
+            let sid = r.uz().ok_or(e)?;
+            if sid >= N_STREAMS || prev.is_some_and(|p| sid <= p) {
+                return Err(e);
+            }
+            let alpha = if is_lazy(sid) {
+                256
+            } else if is_num(sid) {
+                NALPHA
+            } else {
+                return Err(e);
+            };
+            let hdr = r.bytes().ok_or(e)?;
+            m[sid] = Some(Arc::new(read_model(hdr, alpha, 65535, budget)?));
+            prev = Some(sid);
+        }
+        if !r.done() {
+            return Err(e);
+        }
+        Ok(FileTables { m })
+    }
+
+    /// The shared model of stream `sid`, if the section has one.
+    pub fn get(&self, sid: usize) -> Option<&Arc<DModel>> {
+        self.m.get(sid)?.as_ref()
+    }
+}
+
+/// `rans_len uv | rans | extra` of a back end 3 body.
+fn unpack_file<'a>(m: &Arc<DModel>, b: &'a [u8]) -> Result<Unpacked<'a>> {
+    let mut r = Rd::new(b);
+    let rans = r.bytes().ok_or(Error::Corrupt("rans stream"))?;
+    Ok(Unpacked {
+        model: m.clone(),
+        rans,
+        extra: r.rest(),
+    })
+}
+
 // --------------------------------------------------------------- byte streams
 
 #[inline(always)]
@@ -700,17 +899,19 @@ fn byte_ctx(c: u32) -> u32 {
     c & 0xffff
 }
 
-pub fn encode_bytes(syms: &[u8], ctxs: &[u32]) -> Option<Vec<u8>> {
-    let v: Vec<(u32, u16)> = syms
-        .iter()
+fn byte_syms(syms: &[u8], ctxs: &[u32]) -> Vec<(u32, u16)> {
+    syms.iter()
         .zip(ctxs)
         .map(|(&s, &c)| (byte_ctx(c), s as u16))
-        .collect();
-    best_pack(&v, 256, &[])
+        .collect()
+}
+
+pub fn encode_bytes(syms: &[u8], ctxs: &[u32]) -> Option<Vec<u8>> {
+    best_pack(&byte_syms(syms, ctxs), 256, &[])
 }
 
 pub struct ByteDec<'a> {
-    m: DModel,
+    m: Arc<DModel>,
     d: RDec<'a>,
     n: usize,
     used: usize,
@@ -726,7 +927,13 @@ impl<'a> ByteDec<'a> {
         }
     }
     pub fn new(b: &'a [u8], n: usize, budget: &Budget) -> Result<Self> {
-        let u = unpack(b, 256, n, budget)?;
+        Self::from(unpack(b, 256, n, budget)?, n)
+    }
+    /// A back end 3 stream: the model is the file's (TABLES).
+    pub fn new_file(m: &Arc<DModel>, b: &'a [u8], n: usize) -> Result<Self> {
+        Self::from(unpack_file(m, b)?, n)
+    }
+    fn from(u: Unpacked<'a>, n: usize) -> Result<Self> {
         if !u.extra.is_empty() {
             return Err(Error::Corrupt("rans stream"));
         }
@@ -860,7 +1067,8 @@ impl<'a> BitR<'a> {
     }
 }
 
-pub fn encode_num(sid: usize, vals: &[(NCtx, i32)]) -> Option<Vec<u8>> {
+/// Bucket symbols and mantissa bits of numeric values.
+fn num_syms(sid: usize, vals: &[(NCtx, i32)]) -> (Vec<(u32, u16)>, Vec<u8>) {
     let mut syms = Vec::with_capacity(vals.len());
     let mut bw = BitW::default();
     for (c, v) in vals {
@@ -868,12 +1076,17 @@ pub fn encode_num(sid: usize, vals: &[(NCtx, i32)]) -> Option<Vec<u8>> {
         syms.push((num_ctx(sid, c), b));
         bw.put(m, n);
     }
-    best_pack(&syms, NALPHA, &bw.finish())
+    (syms, bw.finish())
+}
+
+pub fn encode_num(sid: usize, vals: &[(NCtx, i32)]) -> Option<Vec<u8>> {
+    let (syms, extra) = num_syms(sid, vals);
+    best_pack(&syms, NALPHA, &extra)
 }
 
 pub struct NumDec<'a> {
     sid: usize,
-    m: DModel,
+    m: Arc<DModel>,
     d: RDec<'a>,
     bits: BitR<'a>,
     n: usize,
@@ -892,15 +1105,21 @@ impl<'a> NumDec<'a> {
         }
     }
     pub fn new(sid: usize, b: &'a [u8], n: usize, budget: &Budget) -> Result<Self> {
-        let u = unpack(b, NALPHA, n, budget)?;
-        Ok(NumDec {
+        Ok(Self::from(sid, unpack(b, NALPHA, n, budget)?, n))
+    }
+    /// A back end 3 stream: the model is the file's (TABLES).
+    pub fn new_file(sid: usize, m: &Arc<DModel>, b: &'a [u8], n: usize) -> Result<Self> {
+        Ok(Self::from(sid, unpack_file(m, b)?, n))
+    }
+    fn from(sid: usize, u: Unpacked<'a>, n: usize) -> Self {
+        NumDec {
             sid,
             m: u.model,
             d: RDec::new(u.rans),
             bits: BitR::new(u.extra),
             n,
             used: 0,
-        })
+        }
     }
     #[inline(always)]
     pub fn get(&mut self, c: NCtx) -> Option<i32> {

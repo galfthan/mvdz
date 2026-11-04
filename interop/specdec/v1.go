@@ -219,7 +219,9 @@ func decodeV1(file []byte) (out []byte, err error) {
 	prefMeta := pr.u64()
 	var meta *v1meta
 	var metaOff, indexOff, adirOff, attachStart uint64
-	var haveMeta, haveIndex, haveAdir, inAttach bool
+	var haveMeta, haveIndex, haveAdir, inAttach, haveTables bool
+	// TABLES (§2.6): the file's shared rANS models by stream id
+	tables := map[uint64]*ransModel{}
 	var ix struct {
 		size, dur uint64
 		crc       uint32
@@ -314,6 +316,35 @@ func decodeV1(file []byte) (out []byte, err error) {
 			}
 			raw += s.rawLen
 			segs = append(segs, s)
+		case 0x86:
+			if haveTables || inAttach || haveIndex || len(segs) > 0 {
+				fail("tables order")
+			}
+			if l > 1<<24 {
+				fail("tables len")
+			}
+			x := &rd{b: body}
+			n := x.uv()
+			if n == 0 || n > 384 {
+				fail("tables count")
+			}
+			prev := int64(-1)
+			for i := uint64(0); i < n; i++ {
+				sid := x.uv()
+				if int64(sid) <= prev || !(isLazy(sid) || isNum(sid)) {
+					fail("tables id")
+				}
+				alpha := uint32(256)
+				if isNum(sid) {
+					alpha = 65
+				}
+				tables[sid] = readModelV1(x.take(x.uv()), alpha, 65535)
+				prev = int64(sid)
+			}
+			if x.left() != 0 {
+				fail("tables trailing")
+			}
+			haveTables = true
 		case 0x04:
 			if haveAdir {
 				fail("attach after adir")
@@ -395,7 +426,7 @@ func decodeV1(file []byte) (out []byte, err error) {
 			if s.share {
 				share = meta.demoinfo[s.dOff : s.dOff+s.dLen]
 			}
-			decodeV1Segment(coded, dst, share)
+			decodeV1Segment(coded, dst, share, tables)
 		case 1:
 			copy(dst, unzstdExact(coded, s.rawLen))
 		case 2:
@@ -477,15 +508,20 @@ func (r *ransV1) done() bool {
 	return (r.extra.k+7)/8 == uint64(len(r.extra.b))
 }
 
-func newRansV1(body []byte, count uint64, numeric bool) *ransV1 {
+// newRansV1: back end 2 (own model header) or, with a file model m, back
+// end 3 (the body without the header).
+func newRansV1(body []byte, count uint64, numeric bool, m *ransModel) *ransV1 {
 	rr := &rd{b: body}
-	hdr := rr.take(rr.uv())
-	words := rr.take(rr.uv())
-	alpha := uint32(256)
-	if numeric {
-		alpha = 65
+	if m == nil {
+		hdr := rr.take(rr.uv())
+		alpha := uint32(256)
+		if numeric {
+			alpha = 65
+		}
+		m = readModelV1(hdr, alpha, count)
 	}
-	r := &ransV1{ransCore{m: readModelV1(hdr, alpha, count), words: words, count: count}}
+	words := rr.take(rr.uv())
+	r := &ransV1{ransCore{m: m, words: words, count: count}}
 	r.extra = &bitRd{b: rr.b[rr.p:]}
 	if !numeric && len(r.extra.b) != 0 {
 		fail("extra on a structural stream")
@@ -522,7 +558,7 @@ func (s *lebNumV1) val(f [6]uint8, sid int) int32 {
 }
 func (s *lebNumV1) done() bool { return s.left == 0 && s.p == len(s.b) }
 
-func decodeV1Segment(body []byte, dst []byte, share []byte) {
+func decodeV1Segment(body []byte, dst []byte, share []byte, tables map[uint64]*ransModel) {
 	r := &rd{b: body}
 	flags := r.uv()
 	dOff, dLen := r.uv(), r.uv()
@@ -544,7 +580,7 @@ func decodeV1Segment(body []byte, dst []byte, share []byte) {
 		if !(isLazy(e.id) || isNum(e.id) || isBlob(e.id)) || seen[e.id] || e.count > uint64(len(dst))+16 {
 			fail("stream entry")
 		}
-		if isBlob(e.id) && e.backend > 1 || e.backend > 2 {
+		if isBlob(e.id) && e.backend > 1 || e.backend > 3 {
 			fail("backend")
 		}
 		seen[e.id] = true
@@ -580,7 +616,9 @@ func decodeV1Segment(body []byte, dst []byte, share []byte) {
 			case 1:
 				lazies[int(e.id)] = &bytesLazy{b: unzstdExact(e.body, e.count)}
 			case 2:
-				lazies[int(e.id)] = newRansV1(e.body, e.count, false)
+				lazies[int(e.id)] = newRansV1(e.body, e.count, false, nil)
+			case 3:
+				lazies[int(e.id)] = newRansV1(e.body, e.count, false, fileModel(tables, e.id))
 			}
 		case isNum(e.id):
 			switch e.backend {
@@ -593,7 +631,9 @@ func decodeV1Segment(body []byte, dst []byte, share []byte) {
 				}
 				nums[int(e.id)] = &lebNumV1{lebNum{b: b}, e.count}
 			case 2:
-				nums[int(e.id)] = newRansV1(e.body, e.count, true)
+				nums[int(e.id)] = newRansV1(e.body, e.count, true, nil)
+			case 3:
+				nums[int(e.id)] = newRansV1(e.body, e.count, true, fileModel(tables, e.id))
 			}
 		}
 	}
@@ -640,3 +680,12 @@ func decodeV1Segment(body []byte, dst []byte, share []byte) {
 }
 
 var _ = bytes.Equal
+
+// fileModel: the TABLES model of a back end 3 stream (§8.4).
+func fileModel(tables map[uint64]*ransModel, id uint64) *ransModel {
+	m := tables[id]
+	if m == nil {
+		fail("back end 3 without a TABLES entry")
+	}
+	return m
+}

@@ -2,6 +2,7 @@
 //! of one SEGMENT, and whole-file decompression.
 
 use crate::budget::{Budget, Charge, ReadOptions, zeroed};
+use crate::coder::rans::FileTables;
 use crate::error::{Error, Result, bad};
 use crate::format::*;
 use crate::segment::{self, frame_scan};
@@ -76,6 +77,7 @@ pub fn body_limit(kind: u8) -> u64 {
     match kind {
         K_META => META_MAX + 64,
         K_INDEX | K_ADIR => DIR_MAX,
+        K_TABLES => TABLES_MAX,
         K_TRAILER => 40,
         _ => u64::MAX,
     }
@@ -121,6 +123,10 @@ pub fn scan_layout(src: &mut impl Src, budget: &Budget) -> Result<Layout> {
                 let (b, _c) = read_vec(src, s.body_off(), s.len, budget)?;
                 lay.index(&s, Index::decode(&b)?)?;
             }
+            K_TABLES => {
+                let (b, _c) = read_vec(src, s.body_off(), s.len, budget)?;
+                lay.tables(&s, FileTables::parse(&b, budget)?);
+            }
             K_ADIR => {
                 let (b, _c) = read_vec(src, s.body_off(), s.len, budget)?;
                 lay.adir(&s, parse_adir(&b)?)?;
@@ -159,12 +165,22 @@ pub fn decode_segment(
     threads: usize,
     budget: &Budget,
 ) -> Result<SegTiming> {
-    decode_segment_share(lay.share(h), body, h, dst, threads, budget)
+    decode_segment_share(
+        lay.share(h),
+        lay.file_tables(),
+        body,
+        h,
+        dst,
+        threads,
+        budget,
+    )
 }
 
-/// [`decode_segment`] with the demoinfo share given directly.
+/// [`decode_segment`] with the demoinfo share and the file's shared models
+/// given directly.
 pub fn decode_segment_share(
     share: &[u8],
+    ft: Option<&FileTables>,
     body: &[u8],
     h: &SegHdr,
     dst: &mut [u8],
@@ -180,7 +196,7 @@ pub fn decode_segment_share(
     match h.coding {
         C_TRANSFORM => {
             let th = segment::parse_header(coded, dst.len())?;
-            segment::decode(coded, &th, dst, share, threads, budget)?;
+            segment::decode(coded, &th, dst, share, ft, threads, budget)?;
         }
         C_ZSTD => {
             let _c = budget.alloc(h.raw_len)?;

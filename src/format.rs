@@ -28,6 +28,8 @@ pub const K_INDEX: u8 = 0x03;
 pub const K_ATTACH: u8 = 0x04;
 pub const K_ADIR: u8 = 0x05;
 pub const K_TRAILER: u8 = 0x7f;
+/// the file's shared rANS models (back end 3), before every segment
+pub const K_TABLES: u8 = 0x86;
 pub const CRITICAL: u8 = 0x80;
 
 /// prefix flag: written by the streaming encoder (metadata near the end)
@@ -49,6 +51,8 @@ pub const SEG_SLACK: u64 = 4096;
 /// Largest META raw payload, INDEX and ADIR section.
 pub const META_MAX: u64 = 1 << 24;
 pub const DIR_MAX: u64 = 1 << 24;
+/// Largest TABLES section body a reader accepts.
+pub const TABLES_MAX: u64 = 1 << 24;
 /// Encoder caps for metadata values (FORMAT.md, "Metadata").
 pub const META_VALUE_MAX: usize = 1 << 16;
 pub const ROSTER_VALUE_MAX: usize = 1 << 12;
@@ -885,6 +889,10 @@ pub struct Layout {
     /// offset of the first ATTACH or ADIR section
     pub attach_start: Option<u64>,
     pub trailer: Option<(u64, Trailer)>,
+    /// TABLES: (section offset, body length, the models)
+    pub tables: Option<(u64, u64, crate::coder::rans::FileTables)>,
+    /// a TABLES section has been seen (its models may still be unread)
+    tables_seen: bool,
     raw: u64,
     dinfo_next: u64,
     /// the budget charge for everything above (metadata, index, directory,
@@ -925,8 +933,18 @@ impl Layout {
             K_META if self.meta.is_some() => bad("duplicate META"),
             K_INDEX if self.index.is_some() => bad("duplicate INDEX"),
             K_ADIR if self.adir.is_some() => bad("duplicate ADIR"),
-            K_META | K_INDEX | K_SEGMENT if in_attach => bad("demo section after the attachments"),
+            K_TABLES if self.tables_seen => bad("duplicate TABLES"),
+            K_META | K_INDEX | K_SEGMENT | K_TABLES if in_attach => {
+                bad("demo section after the attachments")
+            }
             K_SEGMENT if self.index.is_some() => bad("segment after the index"),
+            K_TABLES if !self.segs.is_empty() || self.index.is_some() => {
+                bad("TABLES after a segment")
+            }
+            K_TABLES => {
+                self.tables_seen = true;
+                Ok(())
+            }
             K_META | K_INDEX | K_SEGMENT | K_TRAILER => Ok(()),
             K_ATTACH | K_ADIR => {
                 if self.attach_start.is_none() {
@@ -944,6 +962,17 @@ impl Layout {
             k if k & CRITICAL != 0 => Err(Error::Format("unknown critical section")),
             _ => Ok(()),
         }
+    }
+
+    /// A TABLES section's models (after [`Layout::section`]); the models
+    /// are charged to the budget by the reader.
+    pub fn tables(&mut self, s: &Sec, t: crate::coder::rans::FileTables) {
+        self.tables = Some((s.off, s.len, t));
+    }
+
+    /// The file's shared models, if it has a TABLES section.
+    pub fn file_tables(&self) -> Option<&crate::coder::rans::FileTables> {
+        self.tables.as_ref().map(|t| &t.2)
     }
 
     /// A META section (after [`Layout::section`]).

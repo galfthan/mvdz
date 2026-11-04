@@ -51,3 +51,10 @@ hostile-share-empty.mvdz	error: corrupt: demoinfo share	-	a segment flagged as s
 hostile-meta-no-timing.mvdz	error: corrupt: metadata identity	-	META without tag 8 (timing)
 hostile-ucmd-flag-clear.mvdz	error: corrupt: structure	-	a segment with usercmd blocks coded field by field, flag SF_UCMD cleared
 hostile-ucmd-grid.mvdz	error: corrupt: structure	-	a usercmd block whose grid flags symbol is 9 (stored streams)
+hostile-tables-dup.mvdz	error: corrupt: duplicate TABLES	-	a second TABLES section after the first
+hostile-tables-after-segment.mvdz	error: corrupt: TABLES after a segment	-	the TABLES section after the first SEGMENT
+hostile-tables-missing.mvdz	error: corrupt: no file table for the stream	-	the TABLES section's kind changed to an unknown non-critical kind: segments name back end 3 without a model
+hostile-tables-order.mvdz	error: corrupt: tables	-	two TABLES entries swapped (stream ids not increasing)
+hostile-tables-padding.mvdz	error: corrupt: model	-	a TABLES model with one byte of padding (not consumed exactly)
+hostile-tables-alphabet.mvdz	error: corrupt: model	-	a numeric stream's TABLES entry holding a structural model (alphabet 256)
+hostile-tables-decisions.mvdz	error: corrupt: model	-	a TABLES model breaking the decision limit (rule M2)
