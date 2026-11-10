@@ -32,7 +32,6 @@ pub const MVDZ_E_FORMAT: c_int = -1;
 pub const MVDZ_E_CORRUPT: c_int = -2;
 pub const MVDZ_E_INVALID: c_int = -3;
 pub const MVDZ_E_IO: c_int = -4;
-pub const MVDZ_E_NOTFOUND: c_int = -5;
 pub const MVDZ_E_PANIC: c_int = -6;
 pub const MVDZ_E_LIMIT: c_int = -7;
 pub const MVDZ_E_NOTMVD: c_int = -8;
@@ -47,7 +46,6 @@ fn code(e: &Error) -> c_int {
         Error::Corrupt(_) => MVDZ_E_CORRUPT,
         Error::Limit(_) => MVDZ_E_LIMIT,
         Error::Invalid(_) => MVDZ_E_INVALID,
-        Error::NotFound => MVDZ_E_NOTFOUND,
         Error::Io(_) => MVDZ_E_IO,
         Error::Internal(_) => MVDZ_E_PANIC,
         Error::NotMvd(_) => MVDZ_E_NOTMVD,
@@ -142,7 +140,6 @@ pub extern "C" fn mvdz_strerror(code: c_int) -> *const c_char {
         MVDZ_E_CORRUPT => b"corrupt or truncated file\0",
         MVDZ_E_INVALID => b"invalid argument or handle\0",
         MVDZ_E_IO => b"i/o error\0",
-        MVDZ_E_NOTFOUND => b"not found\0",
         MVDZ_E_PANIC => b"internal error\0",
         MVDZ_E_LIMIT => b"memory or work limit exceeded\0",
         MVDZ_E_NOTMVD => b"input is not an MVD demo (or is corrupt gzip)\0",
@@ -605,7 +602,7 @@ pub unsafe extern "C" fn mvdz_close(r: *mut MvdzReader) {
     }));
 }
 
-// ---------------------------------------------------------------- metadata, attachments
+// ---------------------------------------------------------------- metadata
 
 fn give_json(
     fi: api::FileInfo,
@@ -628,9 +625,9 @@ fn give_json(
     rc
 }
 
-/// Metadata, index and attachment directory as a NUL-terminated JSON
+/// Metadata and index as a NUL-terminated JSON
 /// string (free with mvdz_free). Reads only section headers and the
-/// metadata, index and directory sections; the reading and the JSON are
+/// metadata and index sections; the reading and the JSON are
 /// held within `max_memory`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mvdz_info_json(
@@ -679,108 +676,6 @@ pub unsafe extern "C" fn mvdz_info_json_memory(
     })
 }
 
-/// The bundle hash (FORMAT.md §10.2) into `out[32]`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn mvdz_bundle_hash(
-    read: ReadFn,
-    seek: SeekFn,
-    user: *mut c_void,
-    max_memory: u64,
-    out: *mut u8,
-) -> c_int {
-    guard(MVDZ_E_PANIC, || {
-        if read.is_none() || seek.is_none() || out.is_null() {
-            return MVDZ_E_INVALID;
-        }
-        match api::read_metadata_with(
-            Cb {
-                rd: read,
-                sk: seek,
-                user,
-            },
-            &limits(max_memory),
-        ) {
-            Ok(fi) => {
-                // SAFETY: out points at 32 writable bytes
-                unsafe { std::ptr::copy_nonoverlapping(fi.bundle_hash().as_ptr(), out, 32) };
-                MVDZ_OK
-            }
-            Err(e) => code(&e),
-        }
-    })
-}
-
-/// Same as mvdz_bundle_hash for a file in memory.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn mvdz_bundle_hash_memory(
-    buf: *const c_void,
-    n: usize,
-    max_memory: u64,
-    out: *mut u8,
-) -> c_int {
-    guard(MVDZ_E_PANIC, || {
-        let Some(b) = (unsafe { slice(buf, n) }) else {
-            return MVDZ_E_INVALID;
-        };
-        if out.is_null() {
-            return MVDZ_E_INVALID;
-        }
-        match api::read_metadata_with(std::io::Cursor::new(b), &limits(max_memory)) {
-            Ok(fi) => {
-                // SAFETY: out points at 32 writable bytes
-                unsafe { std::ptr::copy_nonoverlapping(fi.bundle_hash().as_ptr(), out, 32) };
-                MVDZ_OK
-            }
-            Err(e) => code(&e),
-        }
-    })
-}
-
-/// Reads one attachment of a file (via callbacks, seeking straight to it).
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn mvdz_attachment_read(
-    read: ReadFn,
-    seek: SeekFn,
-    user: *mut c_void,
-    name: *const c_char,
-    max_memory: u64,
-    out: *mut *mut u8,
-    out_n: *mut usize,
-) -> c_int {
-    guard(MVDZ_E_PANIC, || {
-        if read.is_none() || seek.is_none() || name.is_null() {
-            return MVDZ_E_INVALID;
-        }
-        let Ok(name) = unsafe { CStr::from_ptr(name) }.to_str() else {
-            return MVDZ_E_NOTFOUND;
-        };
-        match api::read_attachment_with(
-            Cb {
-                rd: read,
-                sk: seek,
-                user,
-            },
-            name,
-            &limits(max_memory),
-        ) {
-            Ok(v) => unsafe { give(v, out, out_n) },
-            Err(e) => code(&e),
-        }
-    })
-}
-
-/// An attachment to add (see mvdz.h).
-#[repr(C)]
-pub struct MvdzAttachment {
-    pub name: *const c_char,
-    pub mime: *const c_char,
-    pub keys: *const *const c_char,
-    pub values: *const *const c_char,
-    pub nkv: usize,
-    pub data: *const c_void,
-    pub size: usize,
-}
-
 /// A UTF-8 C string (None: NULL or not UTF-8).
 unsafe fn cstr(p: *const c_char) -> Option<String> {
     if p.is_null() {
@@ -788,148 +683,6 @@ unsafe fn cstr(p: *const c_char) -> Option<String> {
     } else {
         unsafe { CStr::from_ptr(p) }.to_str().ok().map(String::from)
     }
-}
-
-/// Removes the attachments named in `remove` and adds `add` in the file at
-/// `path` (see api::update_attachments).
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn mvdz_attachments_update(
-    path: *const c_char,
-    remove: *const *const c_char,
-    nremove: usize,
-    add: *const MvdzAttachment,
-    nadd: usize,
-) -> c_int {
-    guard(MVDZ_E_PANIC, || unsafe {
-        let Some(path) = cstr(path) else {
-            return MVDZ_E_INVALID;
-        };
-        if (nremove > 0 && remove.is_null()) || (nadd > 0 && add.is_null()) {
-            return MVDZ_E_INVALID;
-        }
-        let mut rm = Vec::new();
-        for i in 0..nremove {
-            match cstr(*remove.add(i)) {
-                Some(s) => rm.push(s),
-                None => return MVDZ_E_INVALID,
-            }
-        }
-        let mut atts = Vec::new();
-        for i in 0..nadd {
-            let a = &*add.add(i);
-            let (Some(name), Some(data)) = (cstr(a.name), slice(a.data, a.size)) else {
-                return MVDZ_E_INVALID;
-            };
-            if a.nkv > 0 && (a.keys.is_null() || a.values.is_null()) {
-                return MVDZ_E_INVALID;
-            }
-            let mut kv = Vec::new();
-            for k in 0..a.nkv {
-                match (cstr(*a.keys.add(k)), cstr(*a.values.add(k))) {
-                    (Some(x), Some(y)) => kv.push((x, y)),
-                    _ => return MVDZ_E_INVALID,
-                }
-            }
-            let mime = if a.mime.is_null() {
-                String::new()
-            } else {
-                match cstr(a.mime) {
-                    Some(m) => m,
-                    None => return MVDZ_E_INVALID,
-                }
-            };
-            atts.push(api::Attachment {
-                name,
-                mime,
-                kv,
-                data: data.to_vec(),
-            });
-        }
-        let rmr: Vec<&str> = rm.iter().map(|s| s.as_str()).collect();
-        match api::update_attachments(std::path::Path::new(&path), &rmr, &atts) {
-            Ok(()) => MVDZ_OK,
-            Err(e) => code(&e),
-        }
-    })
-}
-
-/// An export selection by name (see mvdz.h).
-#[repr(C)]
-pub struct MvdzSelection {
-    pub keep: *const *const c_char,
-    pub nkeep: usize,
-    pub keep_prefix: *const *const c_char,
-    pub nkeep_prefix: usize,
-    pub drop: *const *const c_char,
-    pub ndrop: usize,
-    pub drop_prefix: *const *const c_char,
-    pub ndrop_prefix: usize,
-}
-
-/// Writes a copy of the file read through `read`/`seek` to `write`,
-/// keeping the attachments `sel` selects (NULL: all). `bundle` (32 bytes,
-/// may be NULL) receives the output's bundle hash.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn mvdz_attachments_export(
-    read: ReadFn,
-    seek: SeekFn,
-    user: *mut c_void,
-    write: WriteFn,
-    wuser: *mut c_void,
-    sel: *const MvdzSelection,
-    bundle: *mut u8,
-) -> c_int {
-    guard(MVDZ_E_PANIC, || unsafe {
-        if read.is_none() || seek.is_none() || write.is_none() {
-            return MVDZ_E_INVALID;
-        }
-        let list = |p: *const *const c_char, n: usize| -> Option<Vec<String>> {
-            if n > 0 && p.is_null() {
-                return None;
-            }
-            (0..n).map(|i| cstr(*p.add(i))).collect()
-        };
-        let sel = match sel.as_ref() {
-            None => api::Selection::default(),
-            Some(s) => {
-                let (Some(keep), Some(keep_prefix), Some(drop), Some(drop_prefix)) = (
-                    list(s.keep, s.nkeep),
-                    list(s.keep_prefix, s.nkeep_prefix),
-                    list(s.drop, s.ndrop),
-                    list(s.drop_prefix, s.ndrop_prefix),
-                ) else {
-                    return MVDZ_E_INVALID;
-                };
-                api::Selection {
-                    keep,
-                    keep_prefix,
-                    drop,
-                    drop_prefix,
-                }
-            }
-        };
-        match api::export_attachments(
-            Cb {
-                rd: read,
-                sk: seek,
-                user,
-            },
-            WCb {
-                wr: write,
-                user: wuser,
-            },
-            |e| sel.matches(e),
-        ) {
-            Ok(h) => {
-                if !bundle.is_null() {
-                    // SAFETY: bundle points at 32 writable bytes
-                    std::ptr::copy_nonoverlapping(h.as_ptr(), bundle, 32);
-                }
-                MVDZ_OK
-            }
-            Err(e) => code(&e),
-        }
-    })
 }
 
 // ---------------------------------------------------------------- streaming writer

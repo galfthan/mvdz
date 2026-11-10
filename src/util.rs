@@ -57,10 +57,6 @@ impl<'a> Rd<'a> {
         let s = self.take(4)?;
         Some(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
     }
-    pub fn u64le(&mut self) -> Option<u64> {
-        let s = self.take(8)?;
-        Some(u64::from_le_bytes(s.try_into().ok()?))
-    }
     pub fn take(&mut self, n: usize) -> Option<&'a [u8]> {
         let s = self.b.get(self.i..self.i.checked_add(n)?)?;
         self.i += n;

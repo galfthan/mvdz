@@ -65,7 +65,7 @@ extern "C" {
 #define MVDZ_E_CORRUPT  -2  /* damaged or truncated file */
 #define MVDZ_E_INVALID  -3  /* bad argument or handle, or operation not possible */
 #define MVDZ_E_IO       -4  /* a callback or file operation failed */
-#define MVDZ_E_NOTFOUND -5  /* no attachment of that name */
+/* -5 is retired (it was MVDZ_E_NOTFOUND). */
 #define MVDZ_E_PANIC    -6  /* internal error */
 #define MVDZ_E_LIMIT    -7  /* memory or work limit exceeded */
 #define MVDZ_E_NOTMVD   -8  /* input to compress is not an MVD demo, or corrupt gzip */
@@ -155,73 +155,16 @@ int mvdz_seek_time(mvdz_reader *r, uint64_t ms, uint64_t *seg_start_ms, uint64_t
 int mvdz_seek_segment(mvdz_reader *r, size_t segment, uint64_t *raw_offset);
 void mvdz_close(mvdz_reader *r);
 
-/* Metadata (identity, bundle hash, server info, roster, census, index,
- * attachment directory) as a NUL-terminated JSON string (FORMAT.md §3.2),
- * read without decoding the demo; the section structure is checked. The
- * identity and the attachment hashes are what the file claims: only a
- * full decode (and reading each attachment) verifies them. *json_n
+/* Metadata (identity, server info, roster, census, index) as a
+ * NUL-terminated JSON string (FORMAT.md §3.2), read without decoding the
+ * demo; the section structure is checked. The identity is what the file
+ * claims: only a full decode verifies it. *json_n
  * excludes the NUL; free with mvdz_free(json, *json_n). Byte strings are
  * rendered as Latin-1 (each byte is the code point of the same value).
- * Attachments are listed under "attachments" (name, mime, size, kv). The
- * JSON counts against max_memory. */
+ * The JSON counts against max_memory. */
 int mvdz_info_json(mvdz_read_fn read, mvdz_seek_fn seek, void *user, uint64_t max_memory, char **json,
                    size_t *json_n);
 int mvdz_info_json_memory(const void *buf, size_t n, uint64_t max_memory, char **json, size_t *json_n);
-
-/* The bundle hash (FORMAT.md §10.2) into out[32]: a SHA-256 over the
- * demo's identity and the attachments' names, MIME types, SHA-256s and
- * keys, independent of how the file is compressed. Meant as a download
- * ETag. Computed from the file's claims, read without decoding. */
-int mvdz_bundle_hash(mvdz_read_fn read, mvdz_seek_fn seek, void *user, uint64_t max_memory,
-                     unsigned char out[32]);
-int mvdz_bundle_hash_memory(const void *buf, size_t n, uint64_t max_memory, unsigned char out[32]);
-
-/* Attachments: files stored beside the demo (voice, transcripts, sidecar
- * data), not part of the demo bytes. Strings are UTF-8. */
-typedef struct mvdz_attachment {
-    const char *name;              /* unique within the file, non-empty */
-    const char *mime;              /* e.g. "text/plain" (may be NULL) */
-    const char *const *keys;       /* nkv key/value pairs; keys carry a */
-    const char *const *values;     /* prefix: "x-..." or "vendor....", §10.1 */
-    size_t nkv;
-    const void *data;
-    size_t size;
-} mvdz_attachment;
-
-/* Reads one attachment (read and seek are both required: it seeks
- * straight to the attachment) and checks its SHA-256. Attachments are
- * untrusted content: see FORMAT.md §14. */
-int mvdz_attachment_read(mvdz_read_fn read, mvdz_seek_fn seek, void *user, const char *name,
-                         uint64_t max_memory, unsigned char **out, size_t *out_n);
-/* Removes the named attachments and adds new ones (an added name replaces
- * an existing one) in the file at path. A key without a prefix (FORMAT.md
- * §10.1) is refused with MVDZ_E_INVALID; an update that would make the file
- * unreadable (an attachment directory over 16 MiB) is refused with
- * MVDZ_E_INVALID and the file is left alone. Safe against crashes and
- * against concurrent updaters (POSIX): an advisory lock on the file
- * serialises updates, the new file is written to a fresh temporary file in
- * the same directory (owner-only until it has the file's permissions and
- * group, before any data is written), synced and renamed over the
- * original. A symlink is followed to the file it names. */
-int mvdz_attachments_update(const char *path, const char *const *remove, size_t nremove,
-                            const mvdz_attachment *add, size_t nadd);
-
-/* Export: writes through `write` a copy of the file read through
- * read/seek that keeps only some attachments (e.g. a download without the
- * large ones). An attachment is kept if its name is in keep or starts with
- * a keep_prefix (every attachment, if both lists are empty) and is in no
- * drop list and starts with no drop_prefix. sel == NULL keeps all. The
- * demo part and the kept attachments are copied byte for byte; the source
- * is not changed. Keeping none gives the file without attachments. bundle
- * (may be NULL) receives the bundle hash of the output. */
-typedef struct mvdz_selection {
-    const char *const *keep;        size_t nkeep;
-    const char *const *keep_prefix; size_t nkeep_prefix;
-    const char *const *drop;        size_t ndrop;
-    const char *const *drop_prefix; size_t ndrop_prefix;
-} mvdz_selection;
-int mvdz_attachments_export(mvdz_read_fn read, mvdz_seek_fn seek, void *user, mvdz_write_fn write,
-                            void *wuser, const mvdz_selection *sel, unsigned char bundle[32]);
 
 /* Streaming compression of a demo that is still being recorded: segments
  * are written as they fill, each one checked by decoding it first. The

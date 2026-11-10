@@ -359,7 +359,7 @@ fn extension_metadata() {
 
 /// TABLES (FORMAT.md §2.6): one-shot segmented files at the normal level
 /// have it, right after META; whole, fast and streamed files do not.
-/// Every reader, attachment updates included, handles it.
+/// Every reader handles it.
 #[test]
 fn file_tables() {
     let src = usercmd_demo();
@@ -376,15 +376,4 @@ fn file_tables() {
     ] {
         assert!(!has(&c), "whole, fast and streamed files have no TABLES");
     }
-    let a = mvdz::Attachment {
-        name: "notes.txt".into(),
-        mime: "text/plain".into(),
-        kv: vec![],
-        data: b"note ".repeat(100),
-    };
-    let with = mvdz::update_attachments_bytes(&seg, &[], &[a]).unwrap();
-    assert!(has(&with));
-    assert!(readers_agree(&with, "tables + attachment").unwrap() == src);
-    let without = mvdz::update_attachments_bytes(&with, &["notes.txt"], &[]).unwrap();
-    assert!(without == seg, "removing the attachment restores the file");
 }

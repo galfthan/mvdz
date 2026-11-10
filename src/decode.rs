@@ -76,15 +76,15 @@ fn read_vec(src: &mut impl Src, off: u64, n: u64, budget: &Budget) -> Result<(Ve
 pub fn body_limit(kind: u8) -> u64 {
     match kind {
         K_META => META_MAX + 64,
-        K_INDEX | K_ADIR => DIR_MAX,
+        K_INDEX => DIR_MAX,
         K_TABLES => TABLES_MAX,
-        K_TRAILER => 40,
+        K_TRAILER => 24,
         _ => u64::MAX,
     }
 }
 
 /// Reads and checks the whole section structure of a complete file:
-/// every section header, the metadata, index and attachment directory,
+/// every section header, the metadata, the index
 /// and the header of every segment (FORMAT.md, "Validation"). Segment
 /// payloads are not decoded.
 pub fn scan_layout(src: &mut impl Src, budget: &Budget) -> Result<Layout> {
@@ -123,10 +123,6 @@ pub fn scan_layout(src: &mut impl Src, budget: &Budget) -> Result<Layout> {
                 let (b, _c) = read_vec(src, s.body_off(), s.len, budget)?;
                 lay.index(&s, Index::decode(&b)?)?;
             }
-            K_ADIR => {
-                let (b, _c) = read_vec(src, s.body_off(), s.len, budget)?;
-                lay.adir(&s, parse_adir(&b)?)?;
-            }
             K_TABLES => {
                 let (b, _c) = read_vec(src, s.body_off(), s.len, budget)?;
                 lay.tables(FileTables::new(b, budget)?)?;
@@ -137,8 +133,8 @@ pub fn scan_layout(src: &mut impl Src, budget: &Budget) -> Result<Layout> {
                 lay.segment(&s, parse_seg_hdr(&b)?)?;
             }
             K_TRAILER => {
-                let mut b = [0u8; 40];
-                if s.len != 40 {
+                let mut b = [0u8; 24];
+                if s.len != 24 {
                     return bad("trailer");
                 }
                 src.read_at(s.body_off(), &mut b)?;

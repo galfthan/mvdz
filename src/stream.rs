@@ -267,8 +267,6 @@ impl<W: Write> StreamEncoder<W> {
             let t = Trailer {
                 index_off,
                 meta_off,
-                adir_off: 0,
-                body_end: s.pos,
             };
             s.w.write_all(&t.bytes())?;
             s.w.flush()?;
@@ -535,10 +533,6 @@ impl<S: Source> Reader<S> {
                     let (b, _c) = self.read_body(&s)?;
                     self.lay.index(&s, Index::decode(&b)?)?;
                 }
-                K_ADIR => {
-                    let (b, _c) = self.read_body(&s)?;
-                    self.lay.adir(&s, parse_adir(&b)?)?;
-                }
                 K_TABLES => {
                     let (b, _c) = self.read_body(&s)?;
                     self.lay.tables(FileTables::new(b, &self.budget)?)?;
@@ -570,7 +564,7 @@ impl<S: Source> Reader<S> {
                     self.done = true;
                 }
                 _ => {
-                    // attachments and unknown sections are skipped unread
+                    // unknown sections are skipped unread
                     let n = io::copy(&mut (&mut self.r).take(s.len), &mut io::sink())?;
                     if n != s.len {
                         return bad("truncated");

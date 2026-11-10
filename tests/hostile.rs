@@ -108,8 +108,22 @@ fn structure_rules() {
     refused(&b, "data after trailer", corrupt);
     // a TRAILER section in the middle
     let mut s8 = secs.clone();
-    s8.insert(1, (K_TRAILER, vec![0; 40]));
+    s8.insert(1, (K_TRAILER, vec![0; 24]));
     refused(&build(0, true, &s8, true), "early trailer", corrupt);
+    // a trailer that names the wrong sections
+    let t = c.len() - TRAILER_LEN + SEC_HDR;
+    for (at, what) in [(0, "wrong index_off"), (8, "wrong meta_off")] {
+        let mut b = c.clone();
+        b[t + at] ^= 1;
+        refused(&b, what, corrupt);
+    }
+    // the 40-byte trailer of earlier release candidates
+    let mut b = c[..c.len() - TRAILER_LEN].to_vec();
+    let mut body = c[t..t + 16].to_vec();
+    body.extend_from_slice(&[0; 16]);
+    body.extend_from_slice(TRAILER_MAGIC);
+    section(&mut b, K_TRAILER, &body);
+    refused(&b, "40-byte trailer", corrupt);
     // an unknown critical section
     let mut s9 = secs.clone();
     s9.insert(1, (0x99, b"x".to_vec()));
@@ -173,33 +187,6 @@ fn declared_sizes() {
     let mut s = secs.clone();
     s[0] = (K_META, mb);
     refused(&build(0, true, &s, true), "256 MiB META", corrupt);
-    // an attachment that claims 60 GB from a few bytes (robustness 3)
-    let c2 = mvdz::update_attachments_bytes(
-        &c,
-        &[],
-        &[mvdz::Attachment {
-            name: "a".into(),
-            data: vec![0; 100_000],
-            ..Default::default()
-        }],
-    )
-    .unwrap();
-    let mut s = sections(&c2);
-    let ia = s.iter().position(|x| x.0 == K_ADIR).unwrap();
-    let mut dir = parse_adir(&s[ia].1).unwrap();
-    dir[0].size = 60 << 30;
-    s[ia].1 = adir_body(&dir);
-    let b = build(0, true, &s, true);
-    assert!(
-        readers_agree(&b, "60 GB attachment").is_some(),
-        "the demo still decodes"
-    );
-    let t = Instant::now();
-    assert!(matches!(
-        mvdz::read_attachment(Cursor::new(&b), "a"),
-        Err(Error::Corrupt(_))
-    ));
-    assert!(t.elapsed().as_secs_f64() < 1.0);
     // the caller's memory budget
     let (demo, c) = base(Level::Normal, 0);
     let small: mvdz::ReadOptions = mvdz::Limits {
@@ -266,16 +253,12 @@ fn mutations_agree() {
     let mut rng = Rng(0x5eed);
     for (level, seg) in [(Level::Normal, 0), (Level::Normal, 300), (Level::Fast, 0)] {
         let (_, c) = base(level, seg);
-        let c = mvdz::update_attachments_bytes(
-            &c,
-            &[],
-            &[mvdz::Attachment {
-                name: "a".into(),
-                data: b"att".repeat(50),
-                ..Default::default()
-            }],
-        )
-        .unwrap();
+        // with a section every reader skips, before the trailer
+        let cut = c.len() - TRAILER_LEN;
+        let mut with = c[..cut].to_vec();
+        section(&mut with, 0x40, &b"future".repeat(25));
+        with.extend_from_slice(&c[cut..]);
+        let c = with;
         for _ in 0..150 {
             let mut b = c.clone();
             match rng.below(3) {
@@ -330,7 +313,7 @@ fn wide_model(n: u32) -> Vec<u8> {
     e.finish()
 }
 
-/// A large, legal TABLES section: the metadata and attachment paths check
+/// A large, legal TABLES section: the metadata path checks
 /// its grammar only (quickly, without building models: a 32 MiB budget is
 /// enough), while a decode builds its models under the reader's budget,
 /// which refuses them.
@@ -356,16 +339,6 @@ fn large_tables() {
     };
     let t0 = Instant::now();
     mvdz::read_metadata_with(Cursor::new(&b), &small).unwrap();
-    let data = b"note ".repeat(100);
-    let a = mvdz::Attachment {
-        name: "notes.txt".into(),
-        mime: "text/plain".into(),
-        kv: vec![],
-        data: data.clone(),
-    };
-    let with = mvdz::update_attachments_bytes(&b, &[], &[a]).unwrap();
-    let got = mvdz::read_attachment_with(Cursor::new(&with), "notes.txt", &small).unwrap();
-    assert!(got == data);
     assert!(
         t0.elapsed().as_secs_f64() < 10.0,
         "TABLES checks took {:?}",

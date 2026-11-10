@@ -45,13 +45,6 @@ pub const ZSTD_NORMAL: i32 = 17;
 /// compress (2.2 at 19, 12.5 at 9) for a file about 5 % larger than at 19
 /// (0.7 % larger than at 9); decode speed is the same.
 pub const ZSTD_FAST: i32 = 6;
-/// zstd level of an attachment's probe: an attachment that does not shrink
-/// by 1/32 at this level is stored without trying `ZSTD_ATTACH` (opus
-/// voice at 19 costs about 0.2 s/MB and is then stored anyway).
-pub const ZSTD_ATTACH_PROBE: i32 = 1;
-/// zstd level of attachments that pass the probe: text such as analysis
-/// JSON is about 4 % smaller at 19 than at 17.
-pub const ZSTD_ATTACH: i32 = 19;
 
 impl Level {
     /// The zstd level of this level's streams, untransformed segments and
@@ -436,7 +429,7 @@ fn numerics(src: &[u8], wk: &Walked) -> Vec<Vec<Vec<(NCtx, i32)>>> {
         .collect()
 }
 
-/// The shared models of a file (FORMAT.md §12 rule 11): one per
+/// The shared models of a file (FORMAT.md §11 rule 11): one per
 /// structural and numeric stream, from its per-context counts summed over
 /// every walked segment `(bytes, walk)`, up to `threads` segments at a
 /// time.

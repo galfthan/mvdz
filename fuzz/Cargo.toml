@@ -28,12 +28,6 @@ test = false
 doc = false
 
 [[bin]]
-name = "attachments"
-path = "fuzz_targets/attachments.rs"
-test = false
-doc = false
-
-[[bin]]
 name = "stream_reader"
 path = "fuzz_targets/stream_reader.rs"
 test = false

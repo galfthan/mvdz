@@ -12,10 +12,8 @@ pub enum Error {
     Corrupt(&'static str),
     /// Decoding would exceed the caller's memory or work budget.
     Limit(&'static str),
-    /// A bad argument (seek past the end, unknown attachment, ...).
+    /// A bad argument (seek past the end, ...).
     Invalid(&'static str),
-    /// No attachment of that name.
-    NotFound,
     /// An I/O error from the underlying reader or writer.
     Io(std::io::ErrorKind),
     /// The encoder could not produce a file that decodes to its input.
@@ -31,7 +29,6 @@ impl std::fmt::Display for Error {
             Error::Corrupt(s) => write!(f, "corrupt: {s}"),
             Error::Limit(s) => write!(f, "limit: {s}"),
             Error::Invalid(s) => write!(f, "invalid argument: {s}"),
-            Error::NotFound => write!(f, "no such attachment"),
             Error::Io(k) => write!(f, "i/o: {k}"),
             Error::Internal(s) => write!(f, "internal: {s}"),
             Error::NotMvd(s) => write!(f, "not an MVD demo: {s}"),

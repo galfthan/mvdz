@@ -162,7 +162,7 @@ fn compress_inner(src: &[u8], cfg: &Config, force_raw: bool) -> Result<(Vec<u8>,
     let (mut proto, mut t, mut dt) = (Proto::default(), 0u64, 0usize);
     let plans = plan(src, &cuts, &mut proto, &mut t, &mut dt);
     // a segmented file at the normal level: one model per rANS stream from
-    // its symbols in every segment, in the TABLES section (FORMAT.md §12)
+    // its symbols in every segment, in the TABLES section (FORMAT.md §11)
     let shared = if cfg.level == Level::Normal && nseg > 1 && !force_raw {
         let segs: Vec<(&[u8], &Walked)> = plans
             .iter()
@@ -300,8 +300,6 @@ fn assemble(
     let t = Trailer {
         index_off,
         meta_off: PREFIX_LEN as u64,
-        adir_off: 0,
-        body_end: out.len() as u64,
     };
     out.extend_from_slice(&t.bytes());
     Ok((out, info))

@@ -8,8 +8,7 @@ duel.normal.streamed.mvdz	3ff1f82b5f0274da0af3f1744e7660d602159c3edfb0089134b728
 duel.fast.streamed.mvdz	3ff1f82b5f0274da0af3f1744e7660d602159c3edfb0089134b728d3f3408d92	266163	duel = sample 3ff1f82b...8d92; Writer --fast, segment 64K
 duel.untransformed.mvdz	3ff1f82b5f0274da0af3f1744e7660d602159c3edfb0089134b728d3f3408d92	266163	duel = sample 3ff1f82b...8d92; every segment zstd (the fallback layout), segment 64K
 duel-truncated.normal.mvdz	abdcc5813b84e4fba456c40e0dff9bc58abdfbe312a49495eb1d8dc666ebe057	150000	the first 150000 bytes of duel (ends inside a frame)
-duel.attach.mvdz	3ff1f82b5f0274da0af3f1744e7660d602159c3edfb0089134b728d3f3408d92	266163	duel.normal + a zstd attachment (text/vtt) and a stored one (random bytes)
-duel.forward.mvdz	3ff1f82b5f0274da0af3f1744e7660d602159c3edfb0089134b728d3f3408d92	266163	duel.attach + prefix flag 0x80 and reserved bytes, an unknown section 0x40, an unknown META tag, an unknown attachment key and codec
+duel.forward.mvdz	3ff1f82b5f0274da0af3f1744e7660d602159c3edfb0089134b728d3f3408d92	266163	duel.normal + prefix flag 0x80 and reserved bytes, unknown sections 0x40, 0x04 and 0x05, an unknown META tag
 float-mvd1.normal.mvdz	3865825ba0ea162e954e4b68f2b102430d7553df8574c345549ebe1ab0f18781	339398	rev-correct gen1/float_mvd1.mvd (MVD1 float coordinates, 3 escapes)
 float-mvd1.fast.mvdz	3865825ba0ea162e954e4b68f2b102430d7553df8574c345549ebe1ab0f18781	339398	the same, --fast
 float-fte.normal.mvdz	5ab0aa3f43bb05996ea450a369db8a17be1c32905765535c706adc6de68942eb	300000	the first 300000 bytes of sample 3fdd8018 (FTE float coordinates)
@@ -55,7 +54,6 @@ hostile-tables-no-entry.mvdz	error: corrupt: back end 3 without a TABLES model	-
 hostile-tables-missing.mvdz	error: corrupt: back end 3 without a TABLES model	-	the TABLES section's kind changed to an unknown non-critical kind: back end 3 without TABLES
 hostile-tables-after-segment.mvdz	error: corrupt: TABLES after a segment or the index	-	the TABLES section after the first SEGMENT
 hostile-tables-after-index.mvdz	error: corrupt: TABLES after a segment or the index	-	an empty demo (no segment) with a TABLES section after the INDEX
-hostile-tables-in-attachments.mvdz	error: corrupt: demo section after the attachments	-	the TABLES section moved into the attachment part, after an ATTACH
 hostile-tables-dup.mvdz	error: corrupt: duplicate TABLES	-	a second TABLES section after the first
 hostile-tables-order.mvdz	error: corrupt: tables	-	two TABLES entries swapped (stream ids not increasing)
 hostile-tables-dup-id.mvdz	error: corrupt: tables	-	a TABLES entry repeated (the same stream id twice)
