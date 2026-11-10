@@ -72,7 +72,6 @@ fuzz_target!(|data: &[u8]| {
                 mvdz_open_memory(
                     file.as_ptr() as *const c_void,
                     file.len(),
-                    1 + (op as c_int >> 6),
                     64 << 20,
                     (op >> 5) as u32 & 1,
                     &mut err,
@@ -85,7 +84,6 @@ fuzz_target!(|data: &[u8]| {
                         Some(rd),
                         Some(sk),
                         &mut *mem as *mut Mem as *mut c_void,
-                        2,
                         64 << 20,
                         0,
                         &mut err,
@@ -99,7 +97,6 @@ fuzz_target!(|data: &[u8]| {
                         Some(rd),
                         None,
                         &mut *mem as *mut Mem as *mut c_void,
-                        1,
                         64 << 20,
                         MVDZ_TRUSTED,
                         &mut err,
@@ -204,7 +201,6 @@ fuzz_target!(|data: &[u8]| {
                         &mut v as *mut Vec<u8> as *mut c_void,
                         (op >> 7) as c_int,
                         64 + op as usize,
-                        1,
                         &mut err,
                     )
                 };

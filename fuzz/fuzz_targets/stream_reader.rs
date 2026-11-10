@@ -22,14 +22,14 @@ fuzz_target!(|data: &[u8]| {
     .into();
     let whole = mvdz::decompress_with(data, 1, &l).ok();
     let mut out = Vec::new();
-    let seq = mvdz::Reader::new(Dribble(data, 0), 1, &l)
+    let seq = mvdz::Reader::new(Dribble(data, 0), &l)
         .ok()
         .and_then(|mut r| r.read_to_end(&mut out).ok().map(|_| out));
     assert_eq!(whole.is_some(), seq.is_some());
     if let (Some(a), Some(b)) = (&whole, &seq) {
         assert!(a == b);
     }
-    if let Ok(mut r) = mvdz::Reader::open(std::io::Cursor::new(data), 2, &l) {
+    if let Ok(mut r) = mvdz::Reader::open(std::io::Cursor::new(data), &l) {
         let n = r.segments();
         if n > 1 {
             let _ = r.seek_segment(n / 2);

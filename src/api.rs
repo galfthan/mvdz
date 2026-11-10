@@ -94,13 +94,8 @@ pub fn decompress_with(b: &[u8], threads: usize, opts: &ReadOptions) -> Result<V
 /// Decompresses from `r` into `w` segment by segment (sequential reading;
 /// nothing is buffered beyond one segment). On an error the bytes already
 /// written are a prefix of the demo.
-pub fn decompress_stream<R: Read, W: Write>(
-    r: R,
-    mut w: W,
-    threads: usize,
-    opts: &ReadOptions,
-) -> Result<u64> {
-    let mut rd = Reader::new(r, threads, opts)?;
+pub fn decompress_stream<R: Read, W: Write>(r: R, mut w: W, opts: &ReadOptions) -> Result<u64> {
+    let mut rd = Reader::new(r, opts)?;
     let mut buf = vec![0u8; 1 << 16];
     let mut n = 0u64;
     loop {
@@ -122,7 +117,7 @@ pub fn decompress_stream<R: Read, W: Write>(
 pub struct Writer<W: Write>(StreamEncoder<W>);
 
 impl<W: Write> Writer<W> {
-    /// `cfg.segment`: segment size in raw bytes (0 = 1 MiB).
+    /// `cfg.segment`: segment size in raw bytes (0 = 256 KiB).
     pub fn new(w: W, cfg: &Config) -> Result<Self> {
         Ok(Writer(StreamEncoder::new(w, cfg)?))
     }
@@ -780,6 +775,6 @@ pub fn write_gzip<W: Write>(data: &[u8], w: W) -> std::io::Result<W> {
 }
 
 /// The original demo, read sequentially (any reader).
-pub fn reader<R: Read>(r: R, threads: usize) -> Result<Reader<Seq<R>>> {
-    Reader::new(r, threads, &ReadOptions::default())
+pub fn reader<R: Read>(r: R) -> Result<Reader<Seq<R>>> {
+    Reader::new(r, &ReadOptions::default())
 }

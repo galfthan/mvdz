@@ -758,13 +758,13 @@ fn all_vectors() -> Option<Vec<Vector>> {
         "duel.normal.mvdz",
         one(&duel, c(Level::Normal, 0)),
         &duel,
-        &format!("{src}; compress"),
+        &format!("{src}; compress -s 0"),
     );
     add(
         "duel.fast.mvdz",
         one(&duel, c(Level::Fast, 0)),
         &duel,
-        &format!("{src}; compress --fast"),
+        &format!("{src}; compress --fast -s 0"),
     );
     let ext = vec![("source".to_string(), b"hub".to_vec())];
     add(

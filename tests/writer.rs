@@ -78,7 +78,7 @@ fn sink_error_is_sticky() {
     full.write_demo(&src).unwrap();
     let f = full.finish().unwrap();
     for cut in [16, 1000, f.len() / 3, f.len() - 50] {
-        let mut r = mvdz::Reader::new(Cursor::new(&f[..cut]), 1, &Default::default()).unwrap();
+        let mut r = mvdz::Reader::new(Cursor::new(&f[..cut]), &Default::default()).unwrap();
         let mut got = Vec::new();
         let mut buf = vec![0u8; 8192];
         let err = loop {
@@ -101,7 +101,7 @@ fn abort_leaves_a_readable_prefix() {
     w.write_demo(&src[..src.len() / 2]).unwrap();
     let out = w.abort();
     assert!(mvdz::decompress(&out, 1).is_err(), "no trailer: incomplete");
-    let mut r = mvdz::Reader::new(Cursor::new(&out), 1, &Default::default()).unwrap();
+    let mut r = mvdz::Reader::new(Cursor::new(&out), &Default::default()).unwrap();
     let mut got = Vec::new();
     let _ = r.read_to_end(&mut got);
     assert!(got.len() > 20_000 && got == src[..got.len()]);
@@ -132,7 +132,7 @@ fn c_handles() {
     let c = mvdz::compress(&src, &cfg(Level::Normal, 300)).unwrap();
     unsafe {
         let mut err = 0;
-        let r = mvdz_open_memory(c.as_ptr() as *const _, c.len(), 1, 0, 0, &mut err);
+        let r = mvdz_open_memory(c.as_ptr() as *const _, c.len(), 0, 0, &mut err);
         assert!(!r.is_null() && err == 0);
         let n = mvdz_segment_count(r);
         assert!(n > 1);
@@ -171,7 +171,7 @@ fn c_handles() {
         let mut bad = c.clone();
         let k = bad.len() / 2;
         bad[k] ^= 0x40;
-        let r = mvdz_open_memory(bad.as_ptr() as *const _, bad.len(), 1, 0, 0, &mut err);
+        let r = mvdz_open_memory(bad.as_ptr() as *const _, bad.len(), 0, 0, &mut err);
         if !r.is_null() {
             let mut big = vec![0u8; 1 << 20];
             let mut first = 0;
@@ -247,7 +247,6 @@ fn c_writer() {
             &mut sink as *mut _ as *mut _,
             0,
             50_000,
-            1,
             &mut err,
         );
         assert!(!w.is_null());
@@ -265,7 +264,6 @@ fn c_writer() {
             &mut sink as *mut _ as *mut _,
             1,
             20_000,
-            1,
             &mut err,
         );
         let mut first = MVDZ_OK;
@@ -294,7 +292,6 @@ fn c_writer() {
             &mut sink as *mut _ as *mut _,
             0,
             20_000,
-            1,
             &mut err,
         );
         assert_eq!(
@@ -342,7 +339,6 @@ fn writer_ext() {
             &mut sink as *mut _ as *mut _,
             1,
             50_000,
-            1,
             &mut err,
         );
         let v = b"hub";
@@ -367,4 +363,45 @@ fn writer_ext() {
         assert_eq!(m.ext, vec![("source".to_string(), b"hub".to_vec())]);
         assert_eq!(mvdz::decompress(&sink.0, 1).unwrap(), src);
     }
+}
+
+/// The defaults: 256 KiB segments from the library, the CLI and the writer
+/// (for which 0 means the default); an explicit 0 is one segment one-shot.
+#[test]
+fn default_segments() {
+    use mvdz::{Config, DEFAULT_SEGMENT};
+    use std::process::{Command, Stdio};
+    assert_eq!(DEFAULT_SEGMENT, 256 << 10);
+    assert_eq!(Config::default().segment, DEFAULT_SEGMENT);
+    let demo = mvdz::decompress(include_bytes!("vectors/duel.normal.mvdz"), 1).unwrap();
+    assert!(demo.len() > DEFAULT_SEGMENT);
+    let segs = |f: &[u8]| {
+        mvdz::Reader::open(Cursor::new(f), &Default::default())
+            .unwrap()
+            .segments()
+    };
+    let lib = mvdz::compress(&demo, &Config::default()).unwrap();
+    assert_eq!(segs(&lib), 2);
+    assert!(
+        sections(&lib).iter().any(|s| s.0 == mvdz::format::K_TABLES),
+        "the default shares its models"
+    );
+    let whole = mvdz::compress(&demo, &cfg(Level::Normal, 0)).unwrap();
+    assert_eq!(segs(&whole), 1);
+    let w0 = stream(&demo, &cfg(Level::Normal, 0));
+    assert_eq!(segs(&w0), 2);
+    assert!(w0 == stream(&demo, &cfg(Level::Normal, DEFAULT_SEGMENT)));
+    let mut cli = Command::new(env!("CARGO_BIN_EXE_mvdz"))
+        .args(["compress", "-j", "1", "-", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    cli.stdin.take().unwrap().write_all(&demo).unwrap();
+    let out = cli.wait_with_output().unwrap();
+    assert!(out.status.success());
+    assert!(
+        out.stdout == lib,
+        "the CLI default differs from the library's"
+    );
 }

@@ -25,8 +25,8 @@ for f in "${FILES[@]}"; do raw=$((raw + $(stat -c %s "$f"))); done
 # library bench's job
 prep() {
   n=$(basename "$1")
-  [ -s "$W/normal/$n.mvdz" ] || "$MVDZ" compress -j 1 "$1" "$W/normal/$n.mvdz"
-  [ -s "$W/fast/$n.mvdz" ] || "$MVDZ" compress --fast -j 1 "$1" "$W/fast/$n.mvdz"
+  [ -s "$W/normal/$n.mvdz" ] || "$MVDZ" compress -s 0 -j 1 "$1" "$W/normal/$n.mvdz"
+  [ -s "$W/fast/$n.mvdz" ] || "$MVDZ" compress --fast -s 0 -j 1 "$1" "$W/fast/$n.mvdz"
   [ -s "$W/xz/$n.xz" ] || xz -9 -T1 -c "$1" > "$W/xz/$n.xz"
   [ -s "$W/zstd/$n.zst" ] || zstd -q -19 -c "$1" > "$W/zstd/$n.zst"
   if [ -n "${ARCHIVE:-}" ] && [ ! -s "$W/gz/$n.gz" ]; then cp "$ARCHIVE/$n.gz" "$W/gz/$n.gz"; fi

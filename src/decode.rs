@@ -162,11 +162,10 @@ pub fn decode_segment(
     body: &[u8],
     h: &SegHdr,
     dst: &mut [u8],
-    threads: usize,
     budget: &Budget,
 ) -> Result<SegTiming> {
     let tables = lay.tables.as_ref();
-    decode_segment_share(lay.share(h), tables, body, h, dst, threads, budget)
+    decode_segment_share(lay.share(h), tables, body, h, dst, budget)
 }
 
 /// [`decode_segment`] with the demoinfo share and the TABLES section given
@@ -177,7 +176,6 @@ pub fn decode_segment_share(
     body: &[u8],
     h: &SegHdr,
     dst: &mut [u8],
-    threads: usize,
     budget: &Budget,
 ) -> Result<SegTiming> {
     if dst.len() as u64 != h.raw_len {
@@ -189,7 +187,7 @@ pub fn decode_segment_share(
     match h.coding {
         C_TRANSFORM => {
             let th = segment::parse_header(coded, dst.len())?;
-            segment::decode(coded, &th, dst, share, tables, threads, budget)?;
+            segment::decode(coded, &th, dst, share, tables, budget)?;
         }
         C_ZSTD => {
             let _c = budget.alloc(h.raw_len)?;
@@ -280,12 +278,6 @@ pub fn decompress(b: &[u8], threads: usize, opts: &ReadOptions) -> Result<Vec<u8
     budget.work(size)?;
     let mut out = zeroed(usz(size).ok_or(Error::Limit("demo size"))?)?;
     let nseg = lay.segs.len();
-    let threads = threads.max(1);
-    let (outer, inner) = if nseg >= threads {
-        (threads, 1)
-    } else {
-        (1, threads)
-    };
     let mut slices: Vec<std::sync::Mutex<&mut [u8]>> = Vec::with_capacity(nseg);
     let mut rest: &mut [u8] = &mut out;
     for (_, h) in &lay.segs {
@@ -293,11 +285,11 @@ pub fn decompress(b: &[u8], threads: usize, opts: &ReadOptions) -> Result<Vec<u8
         slices.push(std::sync::Mutex::new(a));
         rest = r;
     }
-    let res = par_map(outer, nseg, |i| {
+    let res = par_map(threads.max(1), nseg, |i| {
         let (s, h) = &lay.segs[i];
         let body = &b[s.body_off() as usize..s.end() as usize];
         let mut dst = slices[i].lock().map_err(|_| Error::Internal("lock"))?;
-        decode_segment(&lay, body, h, &mut dst, inner, &budget)
+        decode_segment(&lay, body, h, &mut dst, &budget)
     });
     drop(slices);
     let mut chk = DemoCheck::new(&budget);

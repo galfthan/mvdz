@@ -12,13 +12,12 @@ use crate::coder::rans::FileTables;
 use crate::coder::{self, BE_FILE, BE_RANS, BE_STORE, BE_ZSTD, LazyDec, NumDec, rans};
 use crate::error::{Error, Result, bad};
 use crate::format::TABLES_MAX;
-use crate::numeric::{Buf, Group, NCtx, NumIO, WAVE1, WAVE1_PIPE, WAVE2};
+use crate::numeric::{Buf, Group, NCtx, NumIO, WAVE1, WAVE2};
 use crate::proto::{Proto, frame_len};
 use crate::streams::*;
-use crate::util::{HAS_THREADS, Rd, par_map, put_uv};
+use crate::util::{Rd, par_map, put_uv};
 use crate::walk::{Recs, SymIO, Walker};
 use std::borrow::Cow;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Segment flag: KTX demoinfo blocks come from the metadata's store.
 pub const SF_DINFO: u64 = 1;
@@ -33,6 +32,9 @@ pub enum Level {
     /// Every stream stored or zstd.
     Fast,
 }
+
+/// Default segment size, in raw bytes (the writer's too).
+pub const DEFAULT_SEGMENT: usize = 256 << 10;
 
 /// zstd level of the normal level's zstd streams, untransformed segments
 /// and META: 19 is 0.05 % smaller than 17 but about 10 % slower to
@@ -220,7 +222,7 @@ impl<L: LazyCoder> SymIO for DecIO<'_, L> {
     }
 }
 
-const MAXK: usize = 6;
+const MAXK: usize = 2;
 
 struct NumDecIO<N> {
     d: [N; MAXK],
@@ -247,7 +249,7 @@ fn walk_dec<L: LazyCoder>(
     lazy: [L; N_LAZY],
     blobs: Vec<(Cow<'_, [u8]>, usize)>,
     dst: Buf,
-    recs: &Recs,
+    recs: &mut Recs,
     proto: Proto,
     tail: usize,
     dinfo: bool,
@@ -316,13 +318,13 @@ impl Walked {
 /// and the protocol state at its end, or None if the transform cannot
 /// represent the segment.
 pub fn walk(src: &[u8], proto: Proto, dinfo: bool) -> Option<(Walked, Proto)> {
-    let recs = Recs::growable(src.len());
+    let mut recs = Recs::growable(src.len());
     let (io, tail, pend, err) = {
         let mut w: Walker<true, EncIO> = Walker::new(
             src,
             std::ptr::null_mut(),
             0,
-            &recs,
+            &mut recs,
             EncIO::new(),
             proto,
             dinfo,
@@ -330,7 +332,6 @@ pub fn walk(src: &[u8], proto: Proto, dinfo: bool) -> Option<(Walked, Proto)> {
         let tail = w.run(0);
         (w.io, tail, w.proto, w.err)
     };
-    recs.finish();
     if err {
         return None;
     }
@@ -421,22 +422,24 @@ fn groups() -> Vec<Group> {
 
 /// The numeric values of a walked segment, per group (in [`groups`] order)
 /// and stream of the group.
-fn numerics(src: &[u8], wk: &Walked, threads: usize) -> Vec<Vec<Vec<(NCtx, i32)>>> {
-    let groups = groups();
+fn numerics(src: &[u8], wk: &Walked) -> Vec<Vec<Vec<(NCtx, i32)>>> {
     let buf = Buf::ro(src);
-    par_map(threads, groups.len(), |gi| {
-        let g = groups[gi];
-        let mut io = NumEnc {
-            vals: g.streams().iter().map(|_| Vec::new()).collect(),
-        };
-        g.run::<true, NumEnc>(&wk.recs, buf, &mut io);
-        io.vals
-    })
+    groups()
+        .into_iter()
+        .map(|g| {
+            let mut io = NumEnc {
+                vals: g.streams().iter().map(|_| Vec::new()).collect(),
+            };
+            g.run::<true, NumEnc>(&wk.recs, buf, &mut io);
+            io.vals
+        })
+        .collect()
 }
 
 /// The shared models of a file (FORMAT.md §12 rule 11): one per
 /// structural and numeric stream, from its per-context counts summed over
-/// every walked segment `(bytes, walk)`, one segment at a time.
+/// every walked segment `(bytes, walk)`, up to `threads` segments at a
+/// time.
 pub fn train(segs: &[(&[u8], &Walked)], threads: usize) -> Vec<Option<rans::Shared>> {
     let mut tally: Vec<Option<rans::Tally>> = (0..N_STREAMS).map(|_| None).collect();
     let mut add = |sid: usize, alpha: usize, v: &[(u32, u16)]| {
@@ -446,17 +449,20 @@ pub fn train(segs: &[(&[u8], &Walked)], threads: usize) -> Vec<Option<rans::Shar
                 .add(v);
         }
     };
-    for &(s, wk) in segs {
-        for sid in 0..N_LAZY {
-            add(
-                sid,
-                256,
-                &rans::byte_syms(&wk.io.syms[sid], &wk.io.ctxs[sid]),
-            );
-        }
-        for (g, vals) in groups().iter().zip(numerics(s, wk, threads)) {
-            for (&sid, x) in g.streams().iter().zip(vals) {
-                add(sid, rans::NALPHA, &rans::num_syms(sid, &x).0);
+    for chunk in segs.chunks(threads.max(1)) {
+        let nums = par_map(threads, chunk.len(), |i| numerics(chunk[i].0, chunk[i].1));
+        for (&(_, wk), nums) in chunk.iter().zip(nums) {
+            for sid in 0..N_LAZY {
+                add(
+                    sid,
+                    256,
+                    &rans::byte_syms(&wk.io.syms[sid], &wk.io.ctxs[sid]),
+                );
+            }
+            for (g, vals) in groups().iter().zip(nums) {
+                for (&sid, x) in g.streams().iter().zip(vals) {
+                    add(sid, rans::NALPHA, &rans::num_syms(sid, &x).0);
+                }
             }
         }
     }
@@ -506,12 +512,11 @@ pub fn encode(
     wk: &Walked,
     level: Level,
     dinfo_off: u64,
-    threads: usize,
     stats: &mut Vec<StreamStat>,
     shared: &[Option<rans::Shared>],
 ) -> Vec<u8> {
     let groups = groups();
-    let nums = numerics(src, wk, threads);
+    let nums = numerics(src, wk);
     // every non-empty stream is a job: (sid, kind, group, index in group)
     let mut jobs: Vec<(usize, Kind, usize, usize)> = Vec::new();
     for sid in 0..N_LAZY {
@@ -531,28 +536,18 @@ pub fn encode(
             jobs.push((sid, Kind::Blob, 0, 0));
         }
     }
-    let size = |j: &(usize, Kind, usize, usize)| match j.1 {
-        Kind::Lazy => wk.io.syms[j.0].len(),
-        Kind::Num => nums[j.2][j.3].len() * 2,
-        Kind::Blob => wk.io.blobs[j.0].len(),
-    };
-    // biggest first for load balance; output in stream id order
-    let mut order: Vec<usize> = (0..jobs.len()).collect();
-    order.sort_by_key(|&i| std::cmp::Reverse(size(&jobs[i])));
-    let packed_sorted = par_map(threads, jobs.len(), |k| {
-        let (sid, kind, gi, i) = jobs[order[k]];
-        let num: &[(NCtx, i32)] = if matches!(kind, Kind::Num) {
-            &nums[gi][i]
-        } else {
-            &[]
-        };
-        let file = shared.get(sid).and_then(|m| m.as_ref());
-        pack_best(kind, sid, level, wk, num, file)
-    });
-    let mut packed: Vec<Option<(u8, Vec<u8>)>> = (0..jobs.len()).map(|_| None).collect();
-    for (k, p) in packed_sorted.into_iter().enumerate() {
-        packed[order[k]] = Some(p);
-    }
+    let packed: Vec<(u8, Vec<u8>)> = jobs
+        .iter()
+        .map(|&(sid, kind, gi, i)| {
+            let num: &[(NCtx, i32)] = if matches!(kind, Kind::Num) {
+                &nums[gi][i]
+            } else {
+                &[]
+            };
+            let file = shared.get(sid).and_then(|m| m.as_ref());
+            pack_best(kind, sid, level, wk, num, file)
+        })
+        .collect();
     let mut ids: Vec<usize> = (0..jobs.len()).collect();
     ids.sort_by_key(|&i| jobs[i].0);
     let count = |i: usize| match jobs[i].1 {
@@ -573,7 +568,7 @@ pub fn encode(
     put_uv(&mut out, wk.tail as u64);
     put_uv(&mut out, ids.len() as u64);
     for &i in &ids {
-        let (be, body) = packed[i].as_ref().expect("packed");
+        let (be, body) = &packed[i];
         put_uv(&mut out, jobs[i].0 as u64);
         put_uv(&mut out, *be as u64);
         put_uv(&mut out, count(i) as u64);
@@ -586,7 +581,7 @@ pub fn encode(
         });
     }
     for &i in &ids {
-        out.extend_from_slice(&packed[i].as_ref().expect("packed").1);
+        out.extend_from_slice(&packed[i].1);
     }
     out
 }
@@ -713,7 +708,6 @@ pub fn decode(
     dst: &mut [u8],
     dinfo: &[u8],
     tables: Option<&FileTables>,
-    threads: usize,
     budget: &Budget,
 ) -> Result<()> {
     let n = h.ents.len();
@@ -747,18 +741,13 @@ pub fn decode(
         };
     }
     let _charge = budget.alloc(scratch)?;
-    // blob streams first (in parallel)
-    let blob_ix: Vec<usize> = (0..n).filter(|&i| is_blob(h.ents[i].0)).collect();
-    let blobs = par_map(threads, blob_ix.len(), |j| {
-        let i = blob_ix[j];
-        let (_, be, count, _) = h.ents[i];
-        coder::decode_blob(be, bodies[i], count)
-    });
+    // blob streams first
     let mut blob_bufs: Vec<(Cow<[u8]>, usize)> = (0..N_STREAMS)
         .map(|_| (Cow::Borrowed(&[][..]), 0))
         .collect();
-    for (j, b) in blobs.into_iter().enumerate() {
-        blob_bufs[h.ents[blob_ix[j]].0].0 = b?;
+    for i in (0..n).filter(|&i| is_blob(h.ents[i].0)) {
+        let (id, be, count, _) = h.ents[i];
+        blob_bufs[id].0 = coder::decode_blob(be, bodies[i], count)?;
     }
     blob_bufs[DINFO].0 = Cow::Borrowed(dinfo);
     let mut num_ents: Vec<StreamEnt> = vec![None; N_STREAMS];
@@ -771,7 +760,7 @@ pub fn decode(
             num_ents[id] = Some((be, bodies[i], count));
         }
     }
-    let recs = Recs::fixed(
+    let mut recs = Recs::fixed(
         cnt(PI_NUM),
         cnt(PE_BITS),
         cnt(SND_NUM),
@@ -780,7 +769,30 @@ pub fn decode(
         cnt(UC) / UC_MIN_SYMS,
     )?;
     let buf = Buf::new(dst);
-    let run_g = |g: Group| -> Result<()> {
+    let dinfo_on = h.flags & SF_DINFO != 0;
+    // the walk; a monomorphic fast path when every structural stream is rANS
+    if lazy_ents
+        .iter()
+        .all(|e| e.is_none_or(|e| e.0 == BE_RANS || e.0 == BE_FILE))
+    {
+        let mut lazy: [rans::ByteDec; N_LAZY] = std::array::from_fn(|_| rans::ByteDec::empty());
+        for (id, e) in lazy_ents.iter().enumerate() {
+            if let Some((be, b, c)) = *e {
+                lazy[id] = rans::ByteDec::new(b, c, coder::file_model(be, fm, id)?, budget)?;
+            }
+        }
+        walk_dec(lazy, blob_bufs, buf, &mut recs, h.proto, h.tail, dinfo_on)?;
+    } else {
+        let mut lazy: [LazyDec; N_LAZY] = std::array::from_fn(|_| LazyDec::Empty);
+        for (id, e) in lazy_ents.iter().enumerate() {
+            if let Some((be, b, c)) = *e {
+                lazy[id] = LazyDec::new(be, id, b, c, fm, budget)?;
+            }
+        }
+        walk_dec(lazy, blob_bufs, buf, &mut recs, h.proto, h.tail, dinfo_on)?;
+    }
+    // wave 2 reads coordinates wave 1 wrote
+    for g in WAVE1.into_iter().chain(WAVE2) {
         let all_rans = g
             .streams()
             .iter()
@@ -788,97 +800,12 @@ pub fn decode(
         if all_rans {
             run_group(g, &recs, buf, &num_ents, |be, sid, b, c| {
                 rans::NumDec::new(sid, b, c, coder::file_model(be, fm, sid)?, budget)
-            })
+            })?;
         } else {
             run_group(g, &recs, buf, &num_ents, |be, sid, b, c| {
                 NumDec::new(be, sid, b, c, fm, budget)
-            })
+            })?;
         }
-    };
-    let blob_cell = std::sync::Mutex::new(Some(blob_bufs));
-    let dinfo_on = h.flags & SF_DINFO != 0;
-    // the walk; a monomorphic fast path when every structural stream is rANS
-    let walk = || -> Result<()> {
-        let blobs = blob_cell
-            .lock()
-            .map_err(|_| Error::Internal("lock"))?
-            .take()
-            .ok_or(Error::Internal("walk"))?;
-        if lazy_ents
-            .iter()
-            .all(|e| e.is_none_or(|e| e.0 == BE_RANS || e.0 == BE_FILE))
-        {
-            let mut lazy: [rans::ByteDec; N_LAZY] = std::array::from_fn(|_| rans::ByteDec::empty());
-            for (id, e) in lazy_ents.iter().enumerate() {
-                if let Some((be, b, c)) = *e {
-                    lazy[id] = rans::ByteDec::new(b, c, coder::file_model(be, fm, id)?, budget)?;
-                }
-            }
-            walk_dec(lazy, blobs, buf, &recs, h.proto, h.tail, dinfo_on)
-        } else {
-            let mut lazy: [LazyDec; N_LAZY] = std::array::from_fn(|_| LazyDec::Empty);
-            for (id, e) in lazy_ents.iter().enumerate() {
-                if let Some((be, b, c)) = *e {
-                    lazy[id] = LazyDec::new(be, id, b, c, fm, budget)?;
-                }
-            }
-            walk_dec(lazy, blobs, buf, &recs, h.proto, h.tail, dinfo_on)
-        }
-    };
-    if threads > 1 && HAS_THREADS {
-        // pipelined: wave-1 groups follow the walker on worker threads
-        let next = AtomicUsize::new(0);
-        let (wres, gres) = std::thread::scope(|sc| {
-            let workers: Vec<_> = (0..(threads - 1).min(WAVE1_PIPE.len()))
-                .map(|_| {
-                    sc.spawn(|| -> Result<()> {
-                        let mut res = Ok(());
-                        loop {
-                            let i = next.fetch_add(1, Ordering::Relaxed);
-                            if i >= WAVE1_PIPE.len() {
-                                break;
-                            }
-                            let r = run_g(WAVE1_PIPE[i]);
-                            if res.is_ok() {
-                                res = r;
-                            }
-                        }
-                        res
-                    })
-                })
-                .collect();
-            // finish the record buffers on every exit, unwinding included,
-            // so worker threads can never wait forever
-            struct Finish<'r>(&'r Recs);
-            impl Drop for Finish<'_> {
-                fn drop(&mut self) {
-                    self.0.finish();
-                }
-            }
-            let guard = Finish(&recs);
-            let wres = walk();
-            drop(guard);
-            let mut gres = Ok(());
-            for h in workers {
-                let r = h.join().unwrap_or(Err(Error::Internal("worker panicked")));
-                if gres.is_ok() {
-                    gres = r;
-                }
-            }
-            (wres, gres)
-        });
-        wres?;
-        gres?;
-    } else {
-        let r = walk();
-        recs.finish();
-        r?;
-        for &g in &WAVE1 {
-            run_g(g)?;
-        }
-    }
-    for r in par_map(threads.min(2), WAVE2.len(), |i| run_g(WAVE2[i])) {
-        r?;
     }
     Ok(())
 }
@@ -889,24 +816,9 @@ mod tests {
     use crate::budget::Budget;
 
     /// The segment `body` decoded (without demoinfo sharing).
-    fn decoded(
-        body: &[u8],
-        h: &Header,
-        len: usize,
-        tables: Option<&FileTables>,
-        threads: usize,
-    ) -> Vec<u8> {
+    fn decoded(body: &[u8], h: &Header, len: usize, tables: Option<&FileTables>) -> Vec<u8> {
         let mut dst = vec![0u8; len];
-        decode(
-            body,
-            h,
-            &mut dst,
-            &[],
-            tables,
-            threads,
-            &Budget::unlimited(),
-        )
-        .unwrap();
+        decode(body, h, &mut dst, &[], tables, &Budget::unlimited()).unwrap();
         dst
     }
 
@@ -946,14 +858,12 @@ mod tests {
             &[Level::Normal, Level::Fast]
         };
         for &level in levels {
-            for threads in [1, 3] {
-                let (wk, _) = walk(&src, Proto::default(), true).unwrap();
-                let mut st = Vec::new();
-                let body = encode(&src, &wk, level, 0, 1, &mut st, &[]);
-                let h = parse_header(&body, src.len()).unwrap();
-                let dst = decoded(&body, &h, src.len(), None, threads);
-                assert!(dst == src, "{level:?} {threads}");
-            }
+            let (wk, _) = walk(&src, Proto::default(), true).unwrap();
+            let mut st = Vec::new();
+            let body = encode(&src, &wk, level, 0, &mut st, &[]);
+            let h = parse_header(&body, src.len()).unwrap();
+            let dst = decoded(&body, &h, src.len(), None);
+            assert!(dst == src, "{level:?}");
         }
     }
     /// usercmd hidden blocks (type 1): on and off the grid, other lengths,
@@ -1001,20 +911,18 @@ mod tests {
             &[Level::Normal, Level::Fast]
         };
         for &level in levels {
-            for threads in [1, 3] {
-                let (wk, _) = walk(&src, Proto::default(), true).unwrap();
-                let body = encode(&src, &wk, level, 0, 1, &mut Vec::new(), &[]);
-                let h = parse_header(&body, src.len()).unwrap();
-                let uc = h.ents.iter().find(|e| e.0 == UC).unwrap().2;
-                assert!(uc >= (300 + 9) * UC_MIN_SYMS, "{uc}");
-                let dst = decoded(&body, &h, src.len(), None, threads);
-                assert!(dst == src, "{level:?} {threads}");
-            }
+            let (wk, _) = walk(&src, Proto::default(), true).unwrap();
+            let body = encode(&src, &wk, level, 0, &mut Vec::new(), &[]);
+            let h = parse_header(&body, src.len()).unwrap();
+            let uc = h.ents.iter().find(|e| e.0 == UC).unwrap().2;
+            assert!(uc >= (300 + 9) * UC_MIN_SYMS, "{uc}");
+            let dst = decoded(&body, &h, src.len(), None);
+            assert!(dst == src, "{level:?}");
         }
         // without usercmd blocks neither stream is in the table
         let plain = demo();
         let (wk, _) = walk(&plain, Proto::default(), true).unwrap();
-        let body = encode(&plain, &wk, Level::Normal, 0, 1, &mut Vec::new(), &[]);
+        let body = encode(&plain, &wk, Level::Normal, 0, &mut Vec::new(), &[]);
         let h = parse_header(&body, plain.len()).unwrap();
         assert!(h.ents.iter().all(|e| e.0 != UC && e.0 != UC_A));
     }
@@ -1048,12 +956,12 @@ mod tests {
         );
         let ft = FileTables::new(tables_body(&models, &kept), &Budget::unlimited()).unwrap();
         let mut st = Vec::new();
-        let body = encode(&src, &wk, Level::Normal, 0, 1, &mut st, &models);
+        let body = encode(&src, &wk, Level::Normal, 0, &mut st, &models);
         let be = |sid: usize| st.iter().find(|s| s.id == sid).unwrap().be;
         assert_eq!(be(big), BE_RANS);
         assert!(kept.iter().all(|&sid| be(sid) == BE_FILE));
         let h = parse_header(&body, src.len()).unwrap();
-        assert!(decoded(&body, &h, src.len(), Some(&ft), 1) == src);
+        assert!(decoded(&body, &h, src.len(), Some(&ft)) == src);
         // nothing fits: no model is kept
         fit_tables(&mut models, 0);
         assert!(ids(&models).is_empty());

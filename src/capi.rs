@@ -422,7 +422,6 @@ fn open_result(r: Result<RHandle, Error>, err: *mut c_int) -> *mut MvdzReader {
 pub unsafe extern "C" fn mvdz_open_memory(
     buf: *const c_void,
     n: usize,
-    threads: c_int,
     max_memory: u64,
     flags: u32,
     err: *mut c_int,
@@ -436,12 +435,7 @@ pub unsafe extern "C" fn mvdz_open_memory(
             unsafe { set(err, MVDZ_E_INVALID) };
             return std::ptr::null_mut();
         };
-        let r = Reader::open(
-            std::io::Cursor::new(b.to_vec()),
-            threads.max(1) as usize,
-            &o,
-        )
-        .map(|r| RHandle {
+        let r = Reader::open(std::io::Cursor::new(b.to_vec()), &o).map(|r| RHandle {
             raw_size: r.metadata().map_or(-1, |m| m.size as i64),
             r: RInner::Mem(r),
         });
@@ -456,7 +450,6 @@ pub unsafe extern "C" fn mvdz_open_callbacks(
     read: ReadFn,
     seek: SeekFn,
     user: *mut c_void,
-    threads: c_int,
     max_memory: u64,
     flags: u32,
     err: *mut c_int,
@@ -471,14 +464,13 @@ pub unsafe extern "C" fn mvdz_open_callbacks(
             sk: seek,
             user,
         };
-        let th = threads.max(1) as usize;
         let r = if seek.is_some() {
-            Reader::open(cb, th, &l).map(|r| RHandle {
+            Reader::open(cb, &l).map(|r| RHandle {
                 raw_size: r.metadata().map_or(-1, |m| m.size as i64),
                 r: RInner::Seek(r),
             })
         } else {
-            Reader::new(cb, th, &l).map(|r| RHandle {
+            Reader::new(cb, &l).map(|r| RHandle {
                 raw_size: -1,
                 r: RInner::Seq(r),
             })
@@ -970,14 +962,13 @@ impl Write for WCb {
 }
 
 /// Opens a streaming compressor writing through `write`. `level`: 0
-/// normal, 1 fast. `segment`: raw bytes per segment (0 = 1 MiB).
+/// normal, 1 fast. `segment`: raw bytes per segment (0 = 256 KiB).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mvdz_writer_open(
     write: WriteFn,
     user: *mut c_void,
     lvl: c_int,
     segment: usize,
-    threads: c_int,
     err: *mut c_int,
 ) -> *mut MvdzWriter {
     guard(std::ptr::null_mut(), || {
@@ -992,7 +983,6 @@ pub unsafe extern "C" fn mvdz_writer_open(
         let cfg = Config {
             level,
             segment,
-            threads: threads.max(1) as usize,
             ..Default::default()
         };
         match api::Writer::new(WCb { wr: write, user }, &cfg) {
@@ -1131,7 +1121,7 @@ mod tests {
 
     fn open() -> *mut MvdzWriter {
         let mut err = 0;
-        let w = unsafe { mvdz_writer_open(Some(sink), std::ptr::null_mut(), 0, 0, 1, &mut err) };
+        let w = unsafe { mvdz_writer_open(Some(sink), std::ptr::null_mut(), 0, 0, &mut err) };
         assert_eq!(err, MVDZ_OK);
         w
     }
