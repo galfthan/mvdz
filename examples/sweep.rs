@@ -42,7 +42,7 @@ fn main() {
                 .map(|d| Sha256::digest(&d) == want)
                 .unwrap_or(false);
             let mut d = Vec::new();
-            let ok2 = mvdz::Reader::new(std::io::Cursor::new(&c), 1, &Default::default())
+            let ok2 = mvdz::Reader::new(std::io::Cursor::new(&c), &Default::default())
                 .map(|mut r| r.read_to_end(&mut d).is_ok() && Sha256::digest(&d) == want)
                 .unwrap_or(false);
             if !(ok1 && ok2) {

@@ -42,5 +42,5 @@ pub use api::{
 pub use budget::{Limits, ReadOptions};
 pub use error::{Error, Result};
 pub use format::{AttachInfo, Attachment, Index, IndexSeg, Metadata};
-pub use segment::Level;
+pub use segment::{DEFAULT_SEGMENT, Level};
 pub use stream::{Reader, Seekable, Seq};

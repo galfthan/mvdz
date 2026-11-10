@@ -159,7 +159,7 @@ fn seeking() {
             mvdz::compress(&src, &cfg(level, 40_000)).unwrap(),
             stream(&src, &cfg(level, 50_000)),
         ] {
-            let mut r = mvdz::Reader::open(Cursor::new(&c), 2, &Default::default()).unwrap();
+            let mut r = mvdz::Reader::open(Cursor::new(&c), &Default::default()).unwrap();
             let ix = r.index().unwrap().clone();
             assert!(ix.segs.len() > 3);
             for (i, s) in ix.segs.iter().enumerate() {
@@ -285,6 +285,21 @@ fn constructed_demos() {
 
 #[test]
 fn deterministic_output() {
+    // several segments, so the shared models are trained on several threads
+    let d = mvdz::decompress(include_bytes!("vectors/duel.normal.mvdz"), 1).unwrap();
+    for level in LEVELS {
+        let a = mvdz::compress(&d, &cfg(level, 30_000)).unwrap();
+        let b = mvdz::compress(
+            &d,
+            &Config {
+                threads: 3,
+                ..cfg(level, 30_000)
+            },
+        )
+        .unwrap();
+        assert!(a == b, "{level:?}: threads change the segmented output");
+        assert!(mvdz::decompress(&a, 3).unwrap() == d);
+    }
     let src = duel().unwrap_or_else(|| synthetic(&[(0, "{}")], false));
     for level in LEVELS {
         for seg in [0usize, 30_000] {
@@ -299,13 +314,7 @@ fn deterministic_output() {
             .unwrap();
             assert!(a == b, "{level:?} {seg}: threads change the output");
             let s1 = stream(&src, &cfg(level, seg.max(30_000)));
-            let s2 = stream(
-                &src,
-                &Config {
-                    threads: 3,
-                    ..cfg(level, seg.max(30_000))
-                },
-            );
+            let s2 = stream(&src, &cfg(level, seg.max(30_000)));
             assert!(s1 == s2);
         }
     }

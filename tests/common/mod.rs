@@ -345,17 +345,17 @@ pub fn all_readers(b: &[u8]) -> Vec<(&'static str, Result<Vec<u8>, String>)> {
     };
     v.push((
         "sequential",
-        seq(mvdz::Reader::new(Cursor::new(b), 1, &Default::default())),
+        seq(mvdz::Reader::new(Cursor::new(b), &Default::default())),
     ));
     let mut out = Vec::new();
-    let r = mvdz::Reader::new(Dribble(b, 0), 2, &Default::default())
+    let r = mvdz::Reader::new(Dribble(b, 0), &Default::default())
         .map_err(e)
         .and_then(|mut r| {
             r.read_to_end(&mut out).map_err(|x| x.to_string())?;
             Ok(std::mem::take(&mut out))
         });
     v.push(("sequential dribble", r));
-    let r = mvdz::Reader::open(Cursor::new(b), 2, &Default::default())
+    let r = mvdz::Reader::open(Cursor::new(b), &Default::default())
         .map_err(e)
         .and_then(|mut r| {
             let mut out = Vec::new();
@@ -364,7 +364,7 @@ pub fn all_readers(b: &[u8]) -> Vec<(&'static str, Result<Vec<u8>, String>)> {
         });
     v.push(("seekable", r));
     let mut err = 0;
-    let r = unsafe { mvdz_open_memory(b.as_ptr() as *const _, b.len(), 1, 0, 0, &mut err) };
+    let r = unsafe { mvdz_open_memory(b.as_ptr() as *const _, b.len(), 0, 0, &mut err) };
     v.push((
         "c memory",
         if r.is_null() {
@@ -375,7 +375,7 @@ pub fn all_readers(b: &[u8]) -> Vec<(&'static str, Result<Vec<u8>, String>)> {
     ));
     let mut cur = Cursor::new(b);
     let u = &mut cur as *mut Cursor<&[u8]> as *mut std::ffi::c_void;
-    let r = unsafe { mvdz_open_callbacks(Some(cb_read), None, u, 1, 0, 0, &mut err) };
+    let r = unsafe { mvdz_open_callbacks(Some(cb_read), None, u, 0, 0, &mut err) };
     v.push((
         "c sequential",
         if r.is_null() {
@@ -386,7 +386,7 @@ pub fn all_readers(b: &[u8]) -> Vec<(&'static str, Result<Vec<u8>, String>)> {
     ));
     let mut cur = Cursor::new(b);
     let u = &mut cur as *mut Cursor<&[u8]> as *mut std::ffi::c_void;
-    let r = unsafe { mvdz_open_callbacks(Some(cb_read), Some(cb_seek), u, 2, 0, 0, &mut err) };
+    let r = unsafe { mvdz_open_callbacks(Some(cb_read), Some(cb_seek), u, 0, 0, &mut err) };
     v.push((
         "c seekable",
         if r.is_null() {

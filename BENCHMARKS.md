@@ -175,12 +175,18 @@ on these, fast 0.255).
 **Library, in memory** (`mvdz bench`; decode with every check, including
 the SHA-256; compression including the self-check decode). "4t" is one
 file at a time with 4 threads, "batch" 4 files in parallel, one thread
-each.
+each. The 4t columns are at `-s 256K` on 7 of the 8 demos of set8, since
+threads work across segments and a whole file runs at the 1t speed; the
+other columns are whole files.
+Scaling depends on the demo: set8's demos are small, and the larger demos
+of sample40 (x86-64-v3 glibc build, `-s 256K`, median of 3, two rounds)
+decode at 52 to 55 MB/s on 4 threads at the normal level and 85 to 89 MB/s
+at the fast level.
 
-| level | compress 1t | compress 4t | compress batch | decode 1t | decode 4t | decode batch |
+| level | compress 1t | compress 4t (256K) | compress batch | decode 1t | decode 4t (256K) | decode batch |
 |---|---|---|---|---|---|---|
-| normal | 8.1 [7.6-8.4] | 11.7 [11.0-12.2] | 22.2 [21.1-23.8] | 26.8 [25.5-27.5] | 33.5 [29.8-35.8] | 71 [63-83] |
-| fast | 12.8 [11.1-13.3] | 17.8 [16.8-18.5] | 39.2 [28.8-40.6] | 44.2 [39.6-45.3] | 47.8 [44.9-51.7] | 110 [96-121] |
+| normal | 8.1 [7.6-8.4] | 11.0 [10.8-11.5] | 22.2 [21.1-23.8] | 26.8 [25.5-27.5] | 30.9 [29.7-35.1] | 71 [63-83] |
+| fast | 12.8 [11.1-13.3] | 14.5 [12.3-14.6] | 39.2 [28.8-40.6] | 44.2 [39.6-45.3] | 39.0 [34.5-44.0] | 110 [96-121] |
 
 **Command line**, `mvdz decompress`, one process per file, the decoded
 demo written to tmpfs. `mvdz decompress` writes a regular file atomically
@@ -279,7 +285,7 @@ Two checks can be switched off when speed matters more than checking:
 
 The fastest build is the release -v3 download (or a glibc build with
 `target-cpu=native`, see Builds). Release -v3, set8, `mvdz bench --levels
-normal,fast -r 1 -j 4 [-s 256K] [--no-verify --trusted]`, median of 5
+normal,fast -r 1 -j 4 [-s 0 | -s 256K] [--no-verify --trusted]`, median of 5
 interleaved idle-gated rounds, MB/s of raw demo (default → both checks
 off):
 
@@ -298,13 +304,15 @@ off):
 | decode, fast, 4t | 50.2 → 79.1 | 36.4 → 52.3 |
 | decode, fast, batch | 108 → 151 | 54 → 64 |
 
-(Batch = the 8 files in parallel on 4 threads, one thread each. The
-release build without -v3 is 0-15 % slower; its figures are in the raw
+(Batch = the 8 files in parallel on 4 threads, one thread each. The 4t
+rows of this table and of the build table above were measured before
+threads worked only across segments: a whole file now runs at its 1t
+speed. The release build without -v3 is 0-15 % slower; its figures are in the raw
 results.) Switching both checks off makes compression about 1.3 to 1.6
 times and decoding about 1.1 to 1.6 times faster. The fastest way to
 compress is the fast level with verification off, several files at once
 (43 MB/s); the fastest way to decode is a trusted batch of whole-file
-fast-level files (151 MB/s) or, for one file, 4 threads (79 MB/s).
+fast-level files (151 MB/s).
 
 ## Correctness campaigns
 
@@ -349,8 +357,8 @@ cargo-fuzz with AddressSanitizer, `-rss_limit_mb=1536`:
   and capi were not run.
 
 No crash, leak, out-of-memory or timeout in any run. Miri (`cargo +nightly
-miri test --lib`) passes the round-trip, rANS, numeric, CRC and threading
-tests (the pipelined decoder's raw-pointer writer, `par_map`).
+miri test --lib`) passes the round-trip, rANS, numeric, CRC and `par_map`
+tests.
 
 ## Reproducing
 
@@ -364,8 +372,10 @@ used here.
 # ratios and library speeds over a set of demos (as the release builds:
 # --features mimalloc, and --target x86_64-unknown-linux-musl)
 cargo build --release
-target/release/mvdz bench --levels normal,fast -r 1 -j 4 demos/*.mvd
-target/release/mvdz bench --levels normal,fast -r 1 -j 1 --skip-compress --trusted demos/*.mvd
+target/release/mvdz bench --levels normal,fast -s 0 -r 1 -j 4 demos/*.mvd
+target/release/mvdz bench --levels normal,fast -s 0 -r 1 -j 1 --skip-compress --trusted demos/*.mvd
+# the 4t columns
+target/release/mvdz bench --levels normal,fast -s 256K -r 5 -j 4 demos/*.mvd
 
 # command-line decode speed against gzip, xz and zstd (one process per
 # file); for the speed tables each command ran once per round, 5 rounds

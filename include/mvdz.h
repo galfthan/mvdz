@@ -33,7 +33,7 @@
  *    (mvdz_read, mvdz_raw_size, ...) fails with MVDZ_E_INVALID and
  *    mvdz_close does nothing; return an error from the callback and close
  *    the handle after the outer call has returned.
- *  - `threads` arguments are worker threads (1 = none).
+ *  - `threads` arguments are worker threads, one segment each (1 = none).
  *  - `max_memory` arguments cap the memory one call or reader may hold, in
  *    bytes (0 = the default, 1 GiB on 64-bit targets). Exceeding it gives
  *    MVDZ_E_LIMIT.
@@ -114,8 +114,8 @@ int mvdz_is_mvdz(const void *buf, size_t n);
  * decoding gives the raw .mvd). Input that is not an MVD demo (empty, or
  * no whole first frame that parses; see check_demo in the Rust API), and
  * corrupt gzip, give MVDZ_E_NOTMVD. level: MVDZ_LEVEL_*. segment: raw bytes per
- * independently decodable segment, 0 = one segment (the default; note
- * that for mvdz_writer_open 0 means 1 MiB). A file holds at most 65536
+ * independently decodable segment, 0 = one segment (note that for
+ * mvdz_writer_open 0 means 256 KiB). A file holds at most 65536
  * segments: a smaller segment size than that allows is MVDZ_E_INVALID. */
 int mvdz_decompress(const void *in, size_t n, int threads, uint64_t max_memory, unsigned flags,
                     unsigned char **out, size_t *out_n);
@@ -128,9 +128,9 @@ int mvdz_compress(const void *in, size_t n, int level, size_t segment, int threa
  * MVDZ_E_INVALID; with seek, the file must be complete: its whole section
  * structure is checked when it is opened. *err (may be NULL) receives the
  * error code on failure. */
-mvdz_reader *mvdz_open_memory(const void *buf, size_t n, int threads, uint64_t max_memory, unsigned flags,
+mvdz_reader *mvdz_open_memory(const void *buf, size_t n, uint64_t max_memory, unsigned flags,
                               int *err);
-mvdz_reader *mvdz_open_callbacks(mvdz_read_fn read, mvdz_seek_fn seek, void *user, int threads,
+mvdz_reader *mvdz_open_callbacks(mvdz_read_fn read, mvdz_seek_fn seek, void *user,
                                  uint64_t max_memory, unsigned flags, int *err);
 /* Reads up to n bytes of the original demo: returns the count, 0 at the
  * end, or a negative MVDZ_E_* code. Every segment's CRC-32C is checked
@@ -227,26 +227,25 @@ int mvdz_attachments_export(mvdz_read_fn read, mvdz_seek_fn seek, void *user, mv
  * are written as they fill, each one checked by decoding it first. The
  * writer takes raw MVD only: gzip data, a first frame that is not an MVD
  * frame, or finishing with no data gives MVDZ_E_NOTMVD (sticky). A
- * write that would start segment 65537 fails with MVDZ_E_INVALID (use a
- * larger segment size).
+ * write that would start segment 65537 fails with MVDZ_E_INVALID (about
+ * 16 GiB at the default segment size; use a larger one).
  * finish writes the metadata, the index and the trailer and frees the
  * handle; abort frees the handle without finishing (the output is then an
  * incomplete file whose complete segments still decode sequentially).
  * After a write callback error the writer is poisoned: every later call
  * returns the error and nothing more is written. segment: raw bytes per
- * segment (0 = 1 MiB; a writer always cuts segments, unlike
- * mvdz_compress, whose 0 is one segment). threads: worker threads that
- * code the streams of one segment.
+ * segment (0 = 256 KiB; a writer always cuts segments, unlike
+ * mvdz_compress, whose 0 is one segment).
  *
  * Cost: mvdz_writer_write codes a segment on the calling thread, inside
  * the call that fills it, and decodes it once to check it. That takes
  * about 0.15 s per MiB of demo at the normal level and about 0.08 s at
  * the fast level (one core of the Skylake VM of BENCHMARKS.md), so
- * with 1 MiB segments one call in many blocks for that long and the
- * others only copy. Do not call it from a server's frame loop: hand the
+ * with 256 KiB segments one call in many blocks for about a quarter of
+ * that and the others only copy. Do not call it from a server's frame loop: hand the
  * demo bytes to a recording thread that owns the writer (calls on a
  * handle may come from any one thread at a time). */
-mvdz_writer *mvdz_writer_open(mvdz_write_fn write, void *user, int level, size_t segment, int threads,
+mvdz_writer *mvdz_writer_open(mvdz_write_fn write, void *user, int level, size_t segment,
                               int *err);
 int mvdz_writer_write(mvdz_writer *w, const void *data, size_t n);
 /* Sets an extension metadata key (FORMAT.md §3, tag 10; e.g. a match id
