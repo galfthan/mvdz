@@ -173,26 +173,6 @@ fuzz_target!(|data: &[u8]| {
                     check_json(p, n);
                 }
             }
-            13 => {
-                mem.pos = 0;
-                let mut p: *mut u8 = std::ptr::null_mut();
-                let mut n = 0usize;
-                let name = [b'a' + (op >> 4), 0];
-                if unsafe {
-                    mvdz_attachment_read(
-                        Some(rd),
-                        Some(sk),
-                        &mut *mem as *mut Mem as *mut c_void,
-                        name.as_ptr() as *const i8,
-                        64 << 20,
-                        &mut p,
-                        &mut n,
-                    )
-                } == 0
-                {
-                    unsafe { mvdz_free(p as *mut c_void, n) };
-                }
-            }
             14 => {
                 let mut v: Vec<u8> = Vec::new();
                 let w = unsafe {

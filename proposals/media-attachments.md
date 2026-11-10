@@ -1,7 +1,7 @@
 # Proposal: media attachments (voice, commentary, transcripts)
 
-**Status: proposed for version 2, open for discussion.** Not part of
-mvdz 1.0. Version 1 carries attachments as a generic container (FORMAT.md
+**Status: archived.** Attachments were removed from the format before 1.0; the FORMAT.md section numbers below refer to 1.0.0-rc.4. This was proposed for version 2, open for discussion. Not part of
+mvdz 1.0. Release candidates up to rc.4 carried attachments as a generic container (FORMAT.md
 §10): a name, a MIME type, free-form key/values with prefixed keys, the
 stored bytes, crash-safe add and remove, listing and extraction without
 decoding, export of a copy with some attachments, and the bundle hash.

@@ -1,14 +1,14 @@
 //! The library interface.
 
 use crate::budget::{Budget, Limits, ReadOptions};
-use crate::decode::{SeekSrc, SliceSrc, scan_layout};
+use crate::decode::{SeekSrc, scan_layout};
 use crate::error::{Error, Result};
 use crate::format::*;
 use crate::stream::{Reader, Seq, StreamEncoder};
 use std::io::{Read, Seek, Write};
 
 pub use crate::encode::{Config, Info};
-pub use crate::format::{AttachInfo, Attachment, Index, Metadata};
+pub use crate::format::{Index, Metadata};
 
 /// Compresses a demo: a raw `.mvd`, or a gzip-compressed one (`.mvd.gz`),
 /// which is decompressed first. The file holds the raw demo: its identity
@@ -160,7 +160,6 @@ pub struct FileInfo {
     pub flags: u8,
     pub meta: Metadata,
     pub index: Index,
-    pub attachments: Vec<AttachInfo>,
     /// compressed file size
     pub file_size: u64,
 }
@@ -170,12 +169,11 @@ fn file_info(lay: crate::format::Layout, file_size: u64) -> FileInfo {
         flags: lay.flags,
         meta: lay.meta.map(|m| m.1).unwrap_or_default(),
         index: lay.index.map(|i| i.1).unwrap_or_default(),
-        attachments: lay.adir.map(|a| a.1).unwrap_or_default(),
         file_size,
     }
 }
 
-/// Reads the metadata, index and attachment directory of a complete file,
+/// Reads the metadata and index of a complete file,
 /// after checking its section structure (one read per section header and
 /// segment header; no segment is decoded). The metadata is checked against
 /// its CRC, but its identity is verified only by a full decode.
@@ -213,21 +211,10 @@ struct JSeg {
 }
 
 #[derive(serde::Serialize)]
-struct JAttach<'a> {
-    name: &'a str,
-    mime: &'a str,
-    size: u64,
-    stored: u64,
-    sha256: String,
-    kv: serde_json::Map<String, serde_json::Value>,
-}
-
-#[derive(serde::Serialize)]
-struct JInfo<'a> {
+struct JInfo {
     version: u8,
     streamed: bool,
     file_size: u64,
-    bundle_sha256: String,
     sha256: String,
     size: u64,
     duration_ms: u64,
@@ -241,41 +228,6 @@ struct JInfo<'a> {
     census: Option<Box<serde_json::value::RawValue>>,
     clock: serde_json::Value,
     segments: Vec<JSeg>,
-    attachments: Vec<JAttach<'a>>,
-}
-
-/// The bundle hash (FORMAT.md §10.2): SHA-256 over the demo's identity
-/// and the attachment directory's names, MIME types, SHA-256s and
-/// key/values, sorted, in a canonical encoding. Independent of the level,
-/// the segmenting, the attachment codecs and the section order. It is
-/// computed from what the file claims (the META identity and the directory
-/// SHA-256s); a full decode and reading each attachment verify those.
-pub fn bundle_hash(demo_sha256: &[u8; 32], attachments: &[AttachInfo]) -> [u8; 32] {
-    use crate::util::put_uv;
-    use sha2::{Digest, Sha256};
-    let bytes = |o: &mut Vec<u8>, b: &[u8]| {
-        put_uv(o, b.len() as u64);
-        o.extend_from_slice(b);
-    };
-    let mut o = Vec::new();
-    o.extend_from_slice(b"MVDZBND1");
-    o.extend_from_slice(demo_sha256);
-    let mut atts: Vec<&AttachInfo> = attachments.iter().collect();
-    atts.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
-    put_uv(&mut o, atts.len() as u64);
-    for a in atts {
-        bytes(&mut o, a.name.as_bytes());
-        bytes(&mut o, a.mime.as_bytes());
-        o.extend_from_slice(&a.sha256);
-        let mut kv: Vec<&(String, String)> = a.kv.iter().collect();
-        kv.sort_by(|x, y| x.0.as_bytes().cmp(y.0.as_bytes()));
-        put_uv(&mut o, kv.len() as u64);
-        for (k, v) in kv {
-            bytes(&mut o, k.as_bytes());
-            bytes(&mut o, v.as_bytes());
-        }
-    }
-    Sha256::digest(&o).into()
 }
 
 /// A `Write` that refuses to grow past a limit.
@@ -295,11 +247,6 @@ impl Write for Capped {
 }
 
 impl FileInfo {
-    /// The bundle hash of this file (see [`bundle_hash`]).
-    pub fn bundle_hash(&self) -> [u8; 32] {
-        bundle_hash(&self.meta.sha256, &self.attachments)
-    }
-
     /// JSON rendering (see [`FileInfo::to_json_with`]), without a size
     /// limit.
     pub fn to_json(&self) -> String {
@@ -318,7 +265,6 @@ impl FileInfo {
             .filter(|r| r.get().trim_start().starts_with('{'));
         let j = JInfo {
             version: VERSION,
-            bundle_sha256: hex(&self.bundle_hash()),
             streamed: self.flags & F_STREAMED != 0,
             file_size: self.file_size,
             sha256: hex(&m.sha256),
@@ -364,22 +310,6 @@ impl FileInfo {
                     raw_len: s.raw_len,
                 })
                 .collect(),
-            attachments: self
-                .attachments
-                .iter()
-                .map(|a| JAttach {
-                    name: &a.name,
-                    mime: &a.mime,
-                    size: a.size,
-                    stored: a.stored,
-                    sha256: hex(&a.sha256),
-                    kv: a
-                        .kv
-                        .iter()
-                        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-                        .collect(),
-                })
-                .collect(),
         };
         let mut w = Capped(Vec::new(), max);
         serde_json::to_writer(&mut w, &j).map_err(|_| Error::Limit("metadata rendering"))?;
@@ -392,254 +322,7 @@ pub fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-// ---------------------------------------------------------------- attachments
-
-/// Lists the attachments of a file whose names start with `prefix`.
-pub fn list_attachments<R: Read + Seek>(r: R, prefix: &str) -> Result<Vec<AttachInfo>> {
-    let fi = read_metadata(r)?;
-    Ok(fi
-        .attachments
-        .into_iter()
-        .filter(|a| a.name.starts_with(prefix))
-        .collect())
-}
-
-/// Reads one attachment by name (seeks to it; the demo is not read).
-pub fn read_attachment<R: Read + Seek>(r: R, name: &str) -> Result<Vec<u8>> {
-    read_attachment_with(r, name, &Limits::default())
-}
-
-pub fn read_attachment_with<R: Read + Seek>(r: R, name: &str, limits: &Limits) -> Result<Vec<u8>> {
-    let budget = Budget::new(limits);
-    let mut src = SeekSrc(r);
-    let len = crate::decode::Src::len(&mut src)?;
-    budget.input(len);
-    let lay = scan_layout(&mut src, &budget)?;
-    let fi = file_info(lay, len);
-    let e = fi
-        .attachments
-        .iter()
-        .find(|a| a.name == name)
-        .ok_or(Error::NotFound)?;
-    let _c = budget.alloc(e.stored)?;
-    let mut body =
-        crate::budget::zeroed(crate::util::usz(e.stored).ok_or(Error::Limit("attachment size"))?)?;
-    crate::decode::Src::read_at(&mut src, e.off + SEC_HDR as u64, &mut body)?;
-    unpack_attachment(e, body, &budget)
-}
-
-/// Returns the file `b` with the attachments named in `remove` dropped and
-/// `add` appended (an added name replaces an existing one). The demo part
-/// is copied byte for byte; kept attachments are copied without recoding.
-/// An update that changes nothing returns the file as it is; one that
-/// changes the attachment set rebuilds the attachment part, which drops
-/// unknown sections there (FORMAT.md §10, Updating). Refused (nothing is
-/// returned) if the result would break a rule every reader applies (the
-/// directory over 2^24 bytes; checked first with every new entry's sizes
-/// counted at their largest encoding, so a directory within about 20 bytes
-/// per new attachment of the limit may be refused), or if a new attachment
-/// uses an unprefixed key (FORMAT.md §10.1).
-pub fn update_attachments_bytes(b: &[u8], remove: &[&str], add: &[Attachment]) -> Result<Vec<u8>> {
-    check_new_attachments(add)?;
-    let budget = Budget::new(&Limits::default());
-    budget.input(b.len() as u64);
-    let lay = scan_layout(&mut SliceSrc(b), &budget)?;
-    let (_, t) = lay.trailer.ok_or(Error::Corrupt("no trailer"))?;
-    let gone: std::collections::HashSet<&str> = remove
-        .iter()
-        .copied()
-        .chain(add.iter().map(|a| a.name.as_str()))
-        .collect();
-    let all: &[AttachInfo] = lay.adir.as_ref().map_or(&[][..], |d| &d.1[..]);
-    let kept: Vec<&AttachInfo> = all
-        .iter()
-        .filter(|e| !gone.contains(e.name.as_str()))
-        .collect();
-    // no change to the attachment set: the file as it is
-    if add.is_empty() && kept.len() == all.len() {
-        return Ok(b.to_vec());
-    }
-    // the directory's size is known before any attachment is packed (its
-    // offsets are fixed-width)
-    let mut probe: Vec<AttachInfo> = kept.iter().map(|e| (*e).clone()).collect();
-    probe.extend(add.iter().map(|a| AttachInfo {
-        name: a.name.clone(),
-        mime: a.mime.clone(),
-        kv: a.kv.clone(),
-        size: u64::MAX,
-        stored: u64::MAX,
-        ..Default::default()
-    }));
-    if adir_body(&probe).len() as u64 > DIR_MAX {
-        return Err(Error::Invalid("attachment directory over 16 MiB"));
-    }
-    drop(probe);
-    let body_end = t.body_end as usize;
-    let mut out = b[..body_end].to_vec();
-    let mut dir = Vec::new();
-    if let Some((_, d)) = &lay.adir {
-        for e in d {
-            if gone.contains(e.name.as_str()) {
-                continue;
-            }
-            let start = (e.off + SEC_HDR as u64) as usize;
-            let stored = &b[start..start + e.stored as usize];
-            let mut e = e.clone();
-            e.off = out.len() as u64;
-            section(&mut out, K_ATTACH, stored);
-            dir.push(e);
-        }
-    }
-    for a in add {
-        let (e, stored) = pack_attachment(a, out.len() as u64);
-        section(&mut out, K_ATTACH, &stored);
-        dir.push(e);
-    }
-    let adir_off = if dir.is_empty() {
-        0
-    } else {
-        let o = out.len() as u64;
-        let ab = adir_body(&dir);
-        if ab.len() as u64 > DIR_MAX {
-            return Err(Error::Invalid("attachment directory over 16 MiB"));
-        }
-        section(&mut out, K_ADIR, &ab);
-        o
-    };
-    out.extend_from_slice(&Trailer { adir_off, ..t }.bytes());
-    Ok(out)
-}
-
-/// Which attachments an export keeps, by name: those that match a `keep`
-/// name or a `keep_prefix` (all, if both are empty) and match no `drop`
-/// name or `drop_prefix`.
-#[derive(Clone, Debug, Default)]
-pub struct Selection {
-    pub keep: Vec<String>,
-    pub keep_prefix: Vec<String>,
-    pub drop: Vec<String>,
-    pub drop_prefix: Vec<String>,
-}
-
-impl Selection {
-    /// True if attachment `e` is kept.
-    pub fn matches(&self, e: &AttachInfo) -> bool {
-        let n = e.name.as_str();
-        let hit = |names: &[String], prefixes: &[String]| {
-            names.iter().any(|x| x == n) || prefixes.iter().any(|p| n.starts_with(p.as_str()))
-        };
-        ((self.keep.is_empty() && self.keep_prefix.is_empty())
-            || hit(&self.keep, &self.keep_prefix))
-            && !hit(&self.drop, &self.drop_prefix)
-    }
-}
-
-/// Writes to `w` a copy of the file `r` that keeps only the attachments
-/// for which `keep(entry)` is true (FORMAT.md §10, Exporting; see
-/// [`Selection`]):
-/// the demo part byte for byte, the kept ATTACH sections as stored (no
-/// recoding), a new ADIR and a new trailer (unknown sections in the
-/// attachment part are dropped). Keeping every attachment copies the file
-/// as it is. `r` is only read. Keeping none gives the file without
-/// attachments, byte for byte; the result is what removing the others
-/// with [`update_attachments`] gives. Returns the
-/// bundle hash of the output (FORMAT.md §10.2). Memory is bounded by the
-/// directory and a copy buffer, not by the file.
-pub fn export_attachments<R: Read + Seek, W: Write>(
-    r: R,
-    mut w: W,
-    keep: impl Fn(&AttachInfo) -> bool,
-) -> Result<[u8; 32]> {
-    let budget = Budget::new(&Limits::default());
-    let mut src = SeekSrc(r);
-    let len = crate::decode::Src::len(&mut src)?;
-    budget.input(len);
-    let lay = scan_layout(&mut src, &budget)?;
-    let (_, t) = lay.trailer.ok_or(Error::Corrupt("no trailer"))?;
-    let dir: &[AttachInfo] = lay.adir.as_ref().map_or(&[][..], |d| &d.1[..]);
-    let kept: Vec<&AttachInfo> = dir.iter().filter(|e| keep(e)).collect();
-    let mut buf = vec![0u8; 1 << 16];
-    let mut copy = |src: &mut SeekSrc<R>, w: &mut W, mut off: u64, mut n: u64| -> Result<()> {
-        while n > 0 {
-            let k = n.min(buf.len() as u64) as usize;
-            crate::decode::Src::read_at(src, off, &mut buf[..k])?;
-            w.write_all(&buf[..k])?;
-            off += k as u64;
-            n -= k as u64;
-        }
-        Ok(())
-    };
-    // nothing to drop: the file as it is, byte for byte (unknown sections
-    // and non-minimal encodings in the attachment part included)
-    if kept.len() == dir.len() {
-        copy(&mut src, &mut w, 0, len)?;
-        w.flush()?;
-        return Ok(bundle_hash(
-            &lay.meta.as_ref().map(|m| m.1.sha256).unwrap_or_default(),
-            dir,
-        ));
-    }
-    copy(&mut src, &mut w, 0, t.body_end)?;
-    let mut pos = t.body_end;
-    let mut out_dir = Vec::with_capacity(kept.len());
-    for e in &kept {
-        let mut e = (*e).clone();
-        let at = e.off;
-        e.off = pos;
-        copy(&mut src, &mut w, at, SEC_HDR as u64 + e.stored)?;
-        pos += SEC_HDR as u64 + e.stored;
-        out_dir.push(e);
-    }
-    let adir_off = if out_dir.is_empty() {
-        0
-    } else {
-        let mut b = Vec::new();
-        section(&mut b, K_ADIR, &adir_body(&out_dir));
-        w.write_all(&b)?;
-        pos
-    };
-    w.write_all(&Trailer { adir_off, ..t }.bytes())?;
-    w.flush()?;
-    let meta = lay.meta.as_ref().map(|m| m.1.sha256).unwrap_or_default();
-    Ok(bundle_hash(&meta, &out_dir))
-}
-
-/// Updates the attachments of the file at `path` (see
-/// [`update_attachments_bytes`]) safely: an advisory lock on the file
-/// serialises concurrent updaters (threads and processes); the new file is
-/// written to a fresh temporary file in the same directory with the
-/// original's permissions, synced, renamed over the original, and the
-/// directory is synced. A symlink is followed to the file it names.
-/// Readers that have the old file open keep a consistent view (POSIX).
-pub fn update_attachments(
-    path: &std::path::Path,
-    remove: &[&str],
-    add: &[Attachment],
-) -> Result<()> {
-    let real = std::fs::canonicalize(path)?;
-    let (mut f, m) = lock_file(&real)?;
-    let mut b = Vec::new();
-    f.read_to_end(&mut b)?;
-    let out = update_attachments_bytes(&b, remove, add)?;
-    replace_locked(&real, |f| f.write_all(&out), m.permissions(), gid(&m))?;
-    drop(f);
-    Ok(())
-}
-
-/// Opens and locks `path`; retries if another updater replaced the file
-/// while this one waited for the lock.
-fn lock_file(path: &std::path::Path) -> Result<(std::fs::File, std::fs::Metadata)> {
-    for _ in 0..100 {
-        let f = std::fs::File::open(path)?;
-        f.lock()?;
-        let a = f.metadata()?;
-        let b = std::fs::metadata(path)?;
-        if same_file(&a, &b) {
-            return Ok((f, a));
-        }
-    }
-    Err(Error::Io(std::io::ErrorKind::WouldBlock))
-}
+// ---------------------------------------------------------------- files
 
 #[cfg(unix)]
 fn gid(m: &std::fs::Metadata) -> Option<u32> {
@@ -649,17 +332,6 @@ fn gid(m: &std::fs::Metadata) -> Option<u32> {
 #[cfg(not(unix))]
 fn gid(_: &std::fs::Metadata) -> Option<u32> {
     None
-}
-
-#[cfg(unix)]
-fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    a.dev() == b.dev() && a.ino() == b.ino()
-}
-
-#[cfg(not(unix))]
-fn same_file(_: &std::fs::Metadata, _: &std::fs::Metadata) -> bool {
-    true
 }
 
 /// A temporary name nobody else uses: process, time, counter.
@@ -675,7 +347,7 @@ fn temp_name(name: &str, attempt: u32) -> String {
 /// Writes `data` to a new file next to `path` and renames it over `path`;
 /// the new file gets permissions `perm` and (Unix, when allowed) group
 /// `group`.
-fn replace_locked(
+fn replace_file(
     path: &std::path::Path,
     fill: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
     perm: std::fs::Permissions,
@@ -762,7 +434,7 @@ pub fn write_file_atomic_with(
             (p, None)
         }
     };
-    replace_locked(path, fill, perm, group)
+    replace_file(path, fill, perm, group)
 }
 
 /// Writes `data` gzip-compressed (level 6) to `w`, streamed. The gzip

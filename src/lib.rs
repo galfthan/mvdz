@@ -1,7 +1,7 @@
 //! mvdz: lossless, format-aware compression of QuakeWorld MVD demos.
 //!
-//! One file format (FORMAT.md): a section container with metadata,
-//! attachments, a seek index and a trailer, whose segments hold the demo
+//! One file format (FORMAT.md): a section container with metadata, a seek
+//! index and a trailer, whose segments hold the demo
 //! coded by a structural transform (static rANS at the normal level,
 //! per-stream zstd at the fast level).
 //!
@@ -33,14 +33,12 @@ pub mod walk;
 pub mod zst;
 
 pub use api::{
-    Config, FileInfo, Info, Selection, Writer, check_demo, compress, compress_info, decompress,
-    decompress_stream, decompress_with, export_attachments, gunzip, is_gzip, is_mvdz,
-    list_attachments, read_attachment, read_attachment_with, read_metadata, read_metadata_with,
-    update_attachments, update_attachments_bytes, write_file_atomic, write_file_atomic_with,
-    write_gzip,
+    Config, FileInfo, Info, Writer, check_demo, compress, compress_info, decompress,
+    decompress_stream, decompress_with, gunzip, is_gzip, is_mvdz, read_metadata,
+    read_metadata_with, write_file_atomic, write_file_atomic_with, write_gzip,
 };
 pub use budget::{Limits, ReadOptions};
 pub use error::{Error, Result};
-pub use format::{AttachInfo, Attachment, Index, IndexSeg, Metadata};
+pub use format::{Index, IndexSeg, Metadata};
 pub use segment::{DEFAULT_SEGMENT, Level};
 pub use stream::{Reader, Seekable, Seq};

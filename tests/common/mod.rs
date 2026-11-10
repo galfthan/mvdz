@@ -466,9 +466,9 @@ pub fn sections(c: &[u8]) -> Vec<(u8, Vec<u8>)> {
     v
 }
 
-/// Assembles sections: the INDEX segment offsets, the ADIR attachment
-/// offsets and the trailer are recomputed when `fix` is set (until the
-/// re-encoded INDEX and ADIR no longer change length).
+/// Assembles sections: the INDEX segment offsets and the trailer are
+/// recomputed when `fix` is set (until the re-encoded INDEX no longer
+/// changes length).
 pub fn build(flags: u8, prefix_meta: bool, secs: &[(u8, Vec<u8>)], fix: bool) -> Vec<u8> {
     let mut secs = secs.to_vec();
     let offsets = |secs: &[(u8, Vec<u8>)]| -> (Vec<u64>, u64) {
@@ -492,24 +492,17 @@ pub fn build(flags: u8, prefix_meta: bool, secs: &[(u8, Vec<u8>)], fix: bool) ->
                 .map(|(_, &o)| o)
                 .collect()
         };
-        let (seg_offs, att_offs) = (of_kind(K_SEGMENT), of_kind(K_ATTACH));
+        let seg_offs = of_kind(K_SEGMENT);
         let mut changed = false;
         for (k, b) in secs.iter_mut() {
-            let nb = if *k == K_ADIR {
-                let mut d = parse_adir(b).unwrap();
-                for (e, o) in d.iter_mut().zip(&att_offs) {
-                    e.off = *o;
-                }
-                adir_body(&d)
-            } else if *k == K_INDEX {
-                let mut ix = Index::decode(b).unwrap();
-                for (s, o) in ix.segs.iter_mut().zip(&seg_offs) {
-                    s.off = *o;
-                }
-                ix.encode()
-            } else {
+            if *k != K_INDEX {
                 continue;
-            };
+            }
+            let mut ix = Index::decode(b).unwrap();
+            for (s, o) in ix.segs.iter_mut().zip(&seg_offs) {
+                s.off = *o;
+            }
+            let nb = ix.encode();
             changed |= nb != *b;
             *b = nb;
         }
@@ -517,23 +510,17 @@ pub fn build(flags: u8, prefix_meta: bool, secs: &[(u8, Vec<u8>)], fix: bool) ->
             break;
         }
     }
-    let (offs, off) = offsets(&secs);
+    let (offs, _) = offsets(&secs);
     let first = |k: u8| secs.iter().position(|s| s.0 == k).map_or(0, |i| offs[i]);
     let mut out = prefix(flags, if prefix_meta { first(K_META) } else { 0 });
     for (k, b) in &secs {
         section(&mut out, *k, b);
     }
     if fix {
-        let body_end = secs
-            .iter()
-            .position(|s| s.0 == K_ATTACH || s.0 == K_ADIR)
-            .map_or(off, |i| offs[i]);
         out.extend_from_slice(
             &Trailer {
                 index_off: first(K_INDEX),
                 meta_off: first(K_META),
-                adir_off: first(K_ADIR),
-                body_end,
             }
             .bytes(),
         );
