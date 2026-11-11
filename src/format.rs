@@ -191,7 +191,8 @@ pub const T_START_MS: u64 = 11;
 pub const T_EPOCH: u64 = 12;
 pub const T_MATCHDATE: u64 = 13;
 pub const T_PAUSES: u64 = 14;
-const N_TAGS: usize = 15;
+pub const T_MATCHKEY: u64 = 15;
+const N_TAGS: usize = 16;
 
 /// Demo metadata (the META section), raw facts only.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -314,7 +315,11 @@ impl Metadata {
             put_uv(&mut v, ms);
             field(T_START_MS, &v);
         }
-        for (tag, x) in [(T_EPOCH, &c.epoch), (T_MATCHDATE, &c.matchdate)] {
+        for (tag, x) in [
+            (T_EPOCH, &c.epoch),
+            (T_MATCHDATE, &c.matchdate),
+            (T_MATCHKEY, &c.matchkey),
+        ] {
             if let Some((t, raw)) = x {
                 let mut v = Vec::new();
                 put_uv(&mut v, *t);
@@ -446,17 +451,17 @@ impl Metadata {
                     }
                 }
                 T_START_MS => m.clock.start_ms = Some((f.uv().ok_or(e)?, f.uv().ok_or(e)?)),
-                T_EPOCH | T_MATCHDATE => {
+                T_EPOCH | T_MATCHDATE | T_MATCHKEY => {
                     let t = f.uv().ok_or(e)?;
                     let raw = f.rest();
                     if raw.len() > crate::meta::CLOCK_STR_LEN {
                         return Err(e);
                     }
                     let x = Some((t, raw.to_vec()));
-                    if tag == T_EPOCH {
-                        m.clock.epoch = x
-                    } else {
-                        m.clock.matchdate = x
+                    match tag {
+                        T_EPOCH => m.clock.epoch = x,
+                        T_MATCHDATE => m.clock.matchdate = x,
+                        _ => m.clock.matchkey = x,
                     }
                     f.i = v.len();
                 }
@@ -500,6 +505,7 @@ impl Metadata {
         let c = &self.clock;
         let clock = c.epoch.as_ref().map_or(0, |x| x.1.len())
             + c.matchdate.as_ref().map_or(0, |x| x.1.len())
+            + c.matchkey.as_ref().map_or(0, |x| x.1.len())
             + 16 * c.pauses.len();
         (self.demoinfo.len()
             + self.serverinfo.len()

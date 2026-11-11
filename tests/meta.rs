@@ -291,3 +291,35 @@ fn wall_clock_sources() {
         assert_eq!(m.clock.pauses, vec![(198, 150), (218, 7)]);
     }
 }
+
+/// `matchkey:` prints (older mods) are kept raw; a line split over several
+/// prints is joined up to its newline, and only the first line is kept.
+#[test]
+fn matchkey_raw_joined() {
+    let mut d = Demo(Vec::new());
+    d.frame(0, 6, &s(9, &[&z("fullserverinfo \"\\map\\dm2\"\n")]));
+    let mut m = Vec::new();
+    for part in ["matchkey: 4-", "196677-", "9630\nThe match has begun\n"] {
+        m.extend(s(8, &[&[2], &z(part)]));
+    }
+    d.frame(40, 6, &m);
+    d.frame(20, 6, &s(8, &[&[2], &z("matchkey: 9-2005-1-9:1-7-10\n")]));
+    let demo = d.0;
+    for level in [Level::Normal, Level::Fast] {
+        let c = mvdz::compress(&demo, &cfg(level, 0)).unwrap();
+        assert_eq!(readers_agree(&c, "matchkey").unwrap(), demo);
+        let m = mvdz::read_metadata(Cursor::new(&c)).unwrap().meta;
+        assert_eq!(m.clock.matchkey, Some((40, b"4-196677-9630".to_vec())));
+        assert_eq!(m.clock.matchdate, None);
+        assert!(m.census.contains("\"matchkey\":[40,\"4-196677-9630\"]"));
+    }
+    // a line the demo ends inside is kept as far as it goes
+    let mut d = Demo(Vec::new());
+    d.frame(5, 6, &s(8, &[&[2], &z("matchkey: 8-2005-8-13:19-56-18")]));
+    let c = mvdz::compress(&d.0, &cfg(Level::Normal, 0)).unwrap();
+    let m = mvdz::read_metadata(Cursor::new(&c)).unwrap().meta;
+    assert_eq!(
+        m.clock.matchkey,
+        Some((5, b"8-2005-8-13:19-56-18".to_vec()))
+    );
+}

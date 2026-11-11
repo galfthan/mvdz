@@ -5,7 +5,7 @@
 the demo's gzip, decodes back to the exact original bytes (checked by
 SHA-256), can be read sequentially from a pipe or seeked by demo time, and
 carries the demo's metadata (identity hash, server info, roster, a census
-of its contents, wall-clock time) so catalogues can read it without
+of its contents, raw time stamps and pauses) so catalogues can read it without
 decoding.
 
 It comes as a command-line tool, a Rust library, a C library (static or

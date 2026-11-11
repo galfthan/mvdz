@@ -36,7 +36,7 @@ impl<'a> Ch<'a> {
         (0..n).map(|_| self.u8()).collect()
     }
     pub fn text(&mut self, n: usize) -> Vec<u8> {
-        const A: &[u8] = b"abc \\\";\n/xyz0129matchdate:epoch";
+        const A: &[u8] = b"abc \\\";\n/xyz0129matchdate:matchkey:epoch";
         (0..n).map(|_| A[self.below(A.len())]).collect()
     }
 }
@@ -200,6 +200,8 @@ fn command(c: &mut Ch, p: &mut Proto, out: &mut Vec<u8>) {
             let n = c.below(40);
             let mut t = if c.below(4) == 0 {
                 b"matchdate: 2024-01-02 03:04:05 CET\n".to_vec()
+            } else if c.below(4) == 0 {
+                b"matchkey: 8-2005-".to_vec()
             } else {
                 Vec::new()
             };

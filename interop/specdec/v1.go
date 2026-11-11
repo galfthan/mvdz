@@ -68,7 +68,7 @@ func v1meta_(body []byte) *v1meta {
 	for fr.left() > 0 {
 		tag := fr.uv()
 		v := fr.take(fr.uv())
-		if tag >= 1 && tag <= 14 {
+		if tag >= 1 && tag <= 15 {
 			if seen[tag] {
 				fail("dup tag")
 			}
@@ -117,7 +117,7 @@ func v1meta_(body []byte) *v1meta {
 		case 11:
 			f.uv()
 			f.uv()
-		case 12, 13:
+		case 12, 13, 15:
 			f.uv()
 			if f.left() > 128 {
 				fail("clock string")

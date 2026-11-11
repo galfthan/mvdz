@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+* META tag 15 `matchkey`: the raw text of the first `matchkey:` print
+  (older mods' match start stamp, e.g. `8-2003-6-15:16-58-0`), joined
+  over the prints a server splits the line into; also in `mvdz info` and
+  the census `clock`. Readers that do not know tag 15 skip it.
+* The time sources are raw values only: FORMAT.md §3.1 no longer defines
+  how to parse `epoch` or `matchdate`, a ranking of the sources, or a
+  wall-clock base. It describes what each source means and how pauses
+  shift demo time, and leaves interpretation to readers. The stored bytes
+  do not change.
 * Attachments are removed from the format, the library, the C API (the
   `mvdz_attachment*` and `mvdz_bundle_hash*` functions, `MVDZ_E_NOTFOUND`)
   and the CLI (`mvdz attach`), along with the bundle hash.

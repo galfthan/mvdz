@@ -720,6 +720,21 @@ fn start_u64() -> Vec<u8> {
     d.0
 }
 
+/// A synthetic demo with a `matchkey:` line split over three prints
+/// (FORMAT.md §3 tag 15).
+fn matchkey_split() -> Vec<u8> {
+    let mut d = Demo(Vec::new());
+    let mut m = Vec::new();
+    for part in ["matchkey: 8-2003-", "6-15:16-", "58-0\n"] {
+        let mut t = part.as_bytes().to_vec();
+        t.push(0);
+        m.extend(s(8, &[&[2], &t]));
+    }
+    d.frame(0, 6, &m);
+    d.0.extend(synthetic(&[], false));
+    d.0
+}
+
 fn all_vectors() -> Option<Vec<Vector>> {
     let duel = duel()?;
     let mvd1 = std::fs::read(test_data("gen")?.join("float_mvd1.mvd")).ok()?;
@@ -919,6 +934,19 @@ fn all_vectors() -> Option<Vec<Vector>> {
         sc,
         &su,
         "synthetic demo with a 0x000B start timestamp in the 8-byte u64le form (META tag 11 = 1778675998090)",
+    );
+    let mk = matchkey_split();
+    let mc = one(&mk, c(Level::Normal, 0));
+    let fi = mvdz::read_metadata(std::io::Cursor::new(&mc)).unwrap();
+    assert_eq!(
+        fi.meta.clock.matchkey,
+        Some((0, b"8-2003-6-15:16-58-0".to_vec()))
+    );
+    add(
+        "matchkey-split.normal.mvdz",
+        mc,
+        &mk,
+        "synthetic demo with a matchkey: line split over three prints (META tag 15 = 8-2003-6-15:16-58-0)",
     );
     let uc = usercmd_demo();
     add(

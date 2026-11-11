@@ -26,6 +26,8 @@ pub const LINE_LEN: usize = 1 << 16;
 /// Wall-clock sources and pauses (FORMAT.md §3.1): caps.
 pub const CLOCK_STR_LEN: usize = 128;
 pub const PAUSE_RUNS_MAX: usize = 1 << 16;
+/// bytes of a split `matchkey:` line joined before trimming and the cap
+const MATCHKEY_JOIN: usize = 2 * CLOCK_STR_LEN;
 
 /// Wall-clock facts of a demo, each with the demo time (ms) it appeared at.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -36,6 +38,9 @@ pub struct Clock {
     pub epoch: Option<(u64, Vec<u8>)>,
     /// KTX `matchdate:` print: the raw date text after the prefix
     pub matchdate: Option<(u64, Vec<u8>)>,
+    /// `matchkey:` print (older mods): the raw text after the prefix,
+    /// joined over the prints that carry the rest of its line
+    pub matchkey: Option<(u64, Vec<u8>)>,
     /// paused runs (demo ms, real ms paused there), demo ms increasing
     pub pauses: Vec<(u64, u64)>,
     /// more than PAUSE_RUNS_MAX runs: the list stops there
@@ -184,6 +189,8 @@ pub struct Scanner {
     roster_start: Option<BTreeMap<u8, (u32, Vec<u8>)>>,
     demo_start_ts: Option<u64>,
     clock: Clock,
+    /// a `matchkey:` line still waiting for its newline
+    matchkey_open: Option<(u64, Vec<u8>)>,
     /// mvdhidden_demoinfo blocks in file order, each `[u32 len][body]`
     pub demoinfo: Vec<u8>,
 }
@@ -253,6 +260,7 @@ impl Scanner {
             roster: BTreeMap::new(),
             roster_start: None,
             demo_start_ts: None,
+            matchkey_open: None,
             clock: Clock::default(),
             demoinfo: Vec::new(),
         }
@@ -359,6 +367,27 @@ impl Scanner {
         }
     }
 
+    /// Adds the text of one print to the open `matchkey:` line; a newline
+    /// (or the cap) closes it.
+    fn matchkey_part(&mut self, text: &[u8]) {
+        let Some((_, line)) = self.matchkey_open.as_mut() else {
+            return;
+        };
+        let nl = text.iter().position(|&c| c == b'\n');
+        let part = &text[..nl.unwrap_or(text.len())];
+        let room = MATCHKEY_JOIN - line.len();
+        line.extend_from_slice(&part[..part.len().min(room)]);
+        if nl.is_some() || line.len() == MATCHKEY_JOIN {
+            self.matchkey_close();
+        }
+    }
+
+    fn matchkey_close(&mut self) {
+        if let Some((t, line)) = self.matchkey_open.take() {
+            self.clock.matchkey = Some((t, cut(line.trim_ascii(), CLOCK_STR_LEN)));
+        }
+    }
+
     fn command(&mut self, cmd: u8, b: &[u8], dest: u64) {
         match cmd {
             8 => {
@@ -372,6 +401,14 @@ impl Scanner {
                             .unwrap_or(&[])
                             .trim_ascii();
                         self.clock.matchdate = Some((self.t_ms, cut(line, CLOCK_STR_LEN)));
+                    }
+                }
+                if self.matchkey_open.is_some() {
+                    self.matchkey_part(text);
+                } else if self.clock.matchkey.is_none() {
+                    if let Some(rest) = text.strip_prefix(b"matchkey:") {
+                        self.matchkey_open = Some((self.t_ms, Vec::new()));
+                        self.matchkey_part(rest);
                     }
                 }
             }
@@ -558,6 +595,8 @@ impl Scanner {
     }
 
     pub fn finish(mut self) -> Scan {
+        // a `matchkey:` line the demo ends inside
+        self.matchkey_close();
         let digest: [u8; 32] = std::mem::take(&mut self.sha).finalize().into();
         let census = self.census_json();
         let roster = self
@@ -674,6 +713,13 @@ impl Scanner {
         }
         if let Some((t, v)) = &self.clock.matchdate {
             j.key("matchdate");
+            j.arr_open();
+            j.num(*t);
+            j.str(v);
+            j.arr_close();
+        }
+        if let Some((t, v)) = &self.clock.matchkey {
+            j.key("matchkey");
             j.arr_open();
             j.num(*t);
             j.str(v);

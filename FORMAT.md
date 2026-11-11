@@ -236,7 +236,7 @@ fields := { tag uv | len uv | value[len] }*                  (exactly raw_len by
 * Tags 1 (sha256), 2 (size) and 8 (timing) are required.
 * A defined tag's value must have exactly the grammar given (consumed
   exactly; strings checked as stated: tags 9 and 10 UTF-8 where the table
-  says so, tags 12 and 13 at most 128 bytes of `raw`), else the file is
+  says so, tags 12, 13 and 15 at most 128 bytes of `raw`), else the file is
   refused.
 
 | tag | name | value |
@@ -255,6 +255,7 @@ fields := { tag uv | len uv | value[len] }*                  (exactly raw_len by
 | 12 | epoch | `demo_ms uv | raw[rest]`: the first value of the serverinfo key `epoch` (Unix seconds as decimal text, set by mvdsv when the demo starts, `sv_demo.c`), from the initial `fullserverinfo` or a later svc_serverinfo, verbatim (at most 128 bytes), and its demo time |
 | 13 | matchdate | `demo_ms uv | raw[rest]`: the first svc_print whose text starts with `matchdate:` (KTX `match.c`, `matchdate: %Y-%m-%d %H:%M:%S %Z`, sent at match start): the text after the prefix up to the newline, trimmed, verbatim (at most 128 bytes), and the demo time of the print |
 | 14 | pauses | `truncated u8 (0 or 1) | count uv (1..65536) | count x { demo_ms uv, paused_ms uv }`, demo_ms strictly increasing: the paused periods (§3.1) |
+| 15 | matchkey | `demo_ms uv | raw[rest]`: the first svc_print whose text starts with `matchkey:` (older mods, e.g. `matchkey: 8-2003-6-15:16-58-0`, sent at match start): the text after the prefix up to the newline, verbatim, and the demo time of the print. Servers split this line over several prints, so the text of the prints that follow is joined until a newline (or 256 bytes); the result is trimmed and cut to 128 bytes |
 
 **Checked by a full decode** (§5.5): sha256, size and timing must match the
 decoded demo; a mismatch is an error ("identity mismatch", "demo timing").
@@ -262,7 +263,7 @@ A reader that does not decode the demo (a catalogue reading only the
 metadata) gets the CRC check but not these; it must not treat the identity
 as authenticated.
 
-Tags 11-14 are present only when the demo has the corresponding data.
+Tags 11-15 are present only when the demo has the corresponding data.
 
 **Encoder caps** (`format.rs:Metadata::from_scan`, `encode`). The reference
 leaves out a value that is too large, so the META stays small: tags 4-6
@@ -296,43 +297,32 @@ the 3 bytes `u16le 0x000A | u8 ms`). Both forms count. The encoder adds every su
 tag 14 lists one (demo_ms, paused_ms) per pause. At most 65536 runs are
 kept; `truncated` = 1 if more existed.
 
-With `P(t)` = the sum of `paused_ms` over the runs with `demo_ms < t`, the
-wall-clock time (Unix ms) at demo time t is
+MVDZ stores the time sources as the demo has them and does not interpret
+them: it does not parse tags 12, 13 and 15, rank the sources, or compute a
+wall-clock time. Their texts vary across servers, mods and locales (zone
+abbreviations, numeric offsets, localized zone names, ctime-style dates,
+`matchkey` counters without a zone), so interpreting them is left to
+readers. A caller can store outside sources (a hub timestamp, a date in
+the file name) as extension keys (tag 10).
 
-```
-wall(t) = base + t + P(t)
-```
+What readers need to know to use them (informative):
 
-and a pause at demo time p covers the wall-clock interval
-`[wall(p), wall(p) + paused_ms)`. Inversely, a wall-clock time w maps to the
-largest t with `wall(t) <= w` (inside a pause, to the pause's demo time).
-`base` comes from the first available source, in this order:
+* Tags 11 and 12 are the server's clock when it opened the demo file
+  (mvdsv sets `epoch` and writes the 0x000B block while writing the demo's
+  first messages, before any frame time has passed): they correspond to
+  demo time 0, whatever their `demo_ms` (the block typically arrives at
+  about 100 ms; `demo_ms` is kept for reference). Tag 11 is Unix
+  milliseconds; `epoch` is Unix seconds as decimal text.
+* The `matchdate` and `matchkey` prints are sent at match start, so they
+  correspond to their own `demo_ms`.
+* Demo time does not advance during pauses. With `P(t)` = the sum of
+  `paused_ms` over the runs with `demo_ms < t`, a wall-clock time `w0`
+  known at demo time `t0` gives, at demo time t,
+  `w0 + (t - t0) + P(t) - P(t0)`; a pause at demo time p lasts
+  `paused_ms` of wall-clock time. A `truncated` pause list makes `P(t)`
+  exact only up to the last run listed.
 
-| order | source | precision | base |
-|---|---|---|---|
-| 1 | tag 11 start_timestamp | 1 ms | `unix_ms` |
-| 2 | tag 12 epoch | 1 s | `1000 x epoch` (decimal digits, optionally surrounded by ASCII spaces; anything else: unusable) |
-| 3 | tag 13 matchdate | 1 s | `parse(raw) - demo_ms - P(demo_ms)` (below) |
-| 4 | outside sources (a hub timestamp, a date in the file name) | as stated | stored by the encoder's caller as extension keys (tag 10) with their `source`; rank last |
-
-Tags 11 and 12 are the server's clock when it opened the demo file
-(mvdsv sets `epoch` and writes the 0x000B block while writing the
-demo's first messages, before any frame time has passed), so they are
-taken as the wall clock at demo time 0, whatever their `demo_ms` (the
-block typically arrives at about 100 ms; `demo_ms` is kept for
-reference). The `matchdate` print is sent later, at match start, so its
-own demo time and the pauses before it are subtracted.
-
-**Parsing `matchdate`** (so that conforming readers agree): `raw` is
-`YYYY-MM-DD HH:MM:SS` (24-hour), one space, and a zone, which is a numeric
-offset `+HHMM`, `-HHMM`, `+HH:MM` or `-HH:MM`, or one of `UTC`, `GMT`,
-`Z` (+0), `WET` (+0), `WEST` (+1), `CET` (+1), `CEST` (+2), `EET` (+2),
-`EEST` (+3), `MSK` (+3). Anything else (other zone names, locale or
-ctime-style text) is unparseable: the source is then unusable, and a
-reader goes on to the next one.
-
-A pause list that is `truncated` makes `P(t)` exact only up to the last run
-listed. The census repeats tags 11-13 and the pause count and total
+The census repeats tags 11-13 and 15 and the pause count and total
 (`clock`), so `mvdz census` shows which demos carry which source.
 
 ### 3.2 Rendering
@@ -360,7 +350,7 @@ One object per file, keys in this order:
 | `demoinfo` | the reassembled demoinfo JSON (§3), as a Latin-1 string, or `null` |
 | `ext` | tag 10: `{key: Latin-1 string}` |
 | `census` | tag 9 (an object) or `null` |
-| `clock` | `{start_timestamp_ms: [demo_ms, unix_ms] or null, epoch: [demo_ms, raw] or null, matchdate: [demo_ms, raw] or null, pauses: [[demo_ms, paused_ms]...], pauses_truncated}` (tags 11-14) |
+| `clock` | `{start_timestamp_ms: [demo_ms, unix_ms] or null, epoch: [demo_ms, raw] or null, matchdate: [demo_ms, raw] or null, matchkey: [demo_ms, raw] or null, pauses: [[demo_ms, paused_ms]...], pauses_truncated}` (tags 11-15) |
 | `segments` | the INDEX: `[{t_start_ms, raw_offset, raw_len}]` |
 
 Integers are JSON numbers (a reader that keeps only 53-bit doubles may lose
@@ -393,7 +383,8 @@ hidden           {"0xTTTT": [count, bytes]} per hidden block type (dem_multiple,
 demo_start_timestamp_ms   value of the first hidden 0x000B block (as tag 11 reads
                  it); only if there is one
 clock            {[start_timestamp_ms: [demo_ms, unix_ms]], [epoch: [demo_ms, "raw"]],
-                  [matchdate: [demo_ms, "raw"]], pause_runs, paused_ms} as in §3.1
+                  [matchdate: [demo_ms, "raw"]], [matchkey: [demo_ms, "raw"]],
+                  pause_runs, paused_ms} as in §3.1
 raw_path         {escapes, bytes[, first, first_offset]}: unparseable data
                  (unknown or misfitting svc, malformed hidden blocks): count,
                  bytes, where it first happened ("svc N" or "hidden") and its

@@ -296,6 +296,7 @@ impl FileInfo {
                     "start_timestamp_ms": c.start_ms.map(|(t, v)| [t, v]),
                     "epoch": c.epoch.as_ref().map(|(t, v)| serde_json::json!([t, latin1(v)])),
                     "matchdate": c.matchdate.as_ref().map(|(t, v)| serde_json::json!([t, latin1(v)])),
+                    "matchkey": c.matchkey.as_ref().map(|(t, v)| serde_json::json!([t, latin1(v)])),
                     "pauses": c.pauses.iter().map(|p| [p.0, p.1]).collect::<Vec<_>>(),
                     "pauses_truncated": c.pauses_truncated,
                 })
