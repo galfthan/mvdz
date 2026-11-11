@@ -13,7 +13,8 @@
   decoding the demo; `Metadata::roster()` and `roster` in `mvdz info`
   rebuild the old snapshot from it. Capped at 65536 changes and 1 MiB of
   strings (`truncated`). `Metadata::roster` the field is now
-  `Metadata::players`.
+  `Metadata::players`. Files from earlier drafts still decode, but their
+  tag 7 roster is ignored (an empty roster).
 * The time sources are raw values only: FORMAT.md §3.1 no longer defines
   how to parse `epoch` or `matchdate`, a ranking of the sources, or a
   wall-clock base. It describes what each source means and how pauses

@@ -442,6 +442,70 @@ fn hostile(v: &mut Vec<Vector>) {
         build(0, true, &st8, true),
         "META without tag 8 (timing)",
     );
+    // tags 15 and 16 out of their grammar (FORMAT.md §3)
+    let meta_with = |extra: &[(u64, Vec<u8>)]| {
+        // the base META's own tags 15 and 16 are left out
+        let f = meta_fields(&meta);
+        let mut r = mvdz::util::Rd::new(&f);
+        let mut p = Vec::new();
+        while !r.done() {
+            let (t, x) = (r.uv().unwrap(), r.bytes().unwrap());
+            if t != 15 && t != 16 {
+                put_uv(&mut p, t);
+                put_uv(&mut p, x.len() as u64);
+                p.extend_from_slice(x);
+            }
+        }
+        for (t, x) in extra {
+            put_uv(&mut p, *t);
+            put_uv(&mut p, x.len() as u64);
+            p.extend_from_slice(x);
+        }
+        let mut s = secs.clone();
+        s[0] = (K_META, meta_body(&p, false));
+        build(0, true, &s, true)
+    };
+    // truncated, start, count, then (demo_ms, slot, kind, change)...
+    let user = |start: u8, kind: u8| vec![0, start, 1, 0, 0, kind, 7, 1, b'x'];
+    let bad16: [(&str, Vec<u8>, &str); 6] = [
+        ("players-start", user(2, 0), "tag 16 with start > count"),
+        ("players-kind", user(0, 2), "tag 16 change of kind 2"),
+        (
+            "players-empty",
+            vec![0, 0, 0],
+            "tag 16 with no changes and not truncated",
+        ),
+        (
+            "players-order",
+            vec![
+                0, 0, 2, 5, 0, 1, 1, b'k', 1, b'v', 4, 0, 1, 1, b'k', 1, b'v',
+            ],
+            "tag 16 with demo_ms going back",
+        ),
+        (
+            "players-slot",
+            vec![0, 0, 1, 0, 0x80, 0x02, 1, 1, b'k', 1, b'v'],
+            "tag 16 with slot 256",
+        ),
+        (
+            "players-trailing",
+            [user(0, 0), vec![0]].concat(),
+            "tag 16 with a byte after its changes",
+        ),
+    ];
+    for (name, x, how) in bad16 {
+        add(name, meta_with(&[(16, x)]), how);
+    }
+    add(
+        "players-dup",
+        meta_with(&[(16, user(0, 0)), (16, user(0, 0))]),
+        "tag 16 twice",
+    );
+    add(
+        "matchkey-long",
+        meta_with(&[(15, [vec![0], vec![b'k'; 129]].concat())]),
+        "tag 15 with 129 bytes of text",
+    );
     // one usercmd block in a segment of stored streams built by hand
     let mut one = Demo(Vec::new());
     one.hidden(

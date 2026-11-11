@@ -445,6 +445,7 @@ impl Metadata {
                         return Err(e);
                     }
                     let pl = &mut m.players;
+                    pl.changes.reserve_exact(n);
                     pl.truncated = tr == 1;
                     pl.start = start;
                     let mut bytes = 0usize;
@@ -543,8 +544,9 @@ impl Metadata {
     /// budget for keeping it).
     pub fn heap_size(&self) -> u64 {
         let ext: usize = self.ext.iter().map(|(k, v)| k.len() + v.len() + 48).sum();
+        let elem = std::mem::size_of::<(u64, u8, InfoChange)>() + 16;
         let roster: usize = (self.players.changes.iter())
-            .map(|c| c.2.str_len() + 48)
+            .map(|c| c.2.str_len() + elem)
             .sum();
         let c = &self.clock;
         let clock = c.epoch.as_ref().map_or(0, |x| x.1.len())

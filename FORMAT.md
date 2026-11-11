@@ -231,8 +231,10 @@ fields := { tag uv | len uv | value[len] }*                  (exactly raw_len by
   1024 x L + 4096` with L the length of the META section body (as for
   segments, §5.1), else an error ("metadata size"). `crc` is the CRC-32C
   of the raw `fields` bytes; a mismatch is an error.
-* Tags 1 to 14 are defined below; each may appear at most once (a
-  duplicate is an error). Other tags are skipped (and may repeat).
+* Tags 1 to 16 are defined below; each may appear at most once (a
+  duplicate is an error). Tag 7 is unassigned: its value is skipped, but
+  it too may appear at most once. Other tags are skipped (and may
+  repeat).
 * Tags 1 (sha256), 2 (size) and 8 (timing) are required.
 * A defined tag's value must have exactly the grammar given (consumed
   exactly; strings checked as stated: tags 9 and 10 UTF-8 where the table
@@ -253,9 +255,9 @@ fields := { tag uv | len uv | value[len] }*                  (exactly raw_len by
 | 10 | ext | `count uv | count x { klen uv, key[klen] (UTF-8), vlen uv, value[vlen] }`, keys unique (bytewise): extension key/values given at compress time (e.g. `source`, `hub_game_id`, `captured`); not part of the demo bytes |
 | 11 | start_timestamp | `demo_ms uv | unix_ms uv`: the value of the first hidden block 0x000B (mvdhidden_demo_start_timestamp_ms: Unix milliseconds when the server opened the demo, mvdsv `sv_demo_misc.c` `SV_MVDEmbedStartTimestamp`) and the demo time it appeared at. The block body has two forms: current mvdsv writes a ULEB128, earlier builds a fixed 8-byte u64le. A body of exactly 8 bytes whose ULEB128 does not end at its 8th byte (a byte below 0x80 earlier) is the u64le; any other body is read as ULEB128 over at most its first 10 bytes, stopping after the first byte below 0x80 or at the end of the body |
 | 12 | epoch | `demo_ms uv | raw[rest]`: the first value of the serverinfo key `epoch` (Unix seconds as decimal text, set by mvdsv when the demo starts, `sv_demo.c`), from the initial `fullserverinfo` or a later svc_serverinfo, verbatim (at most 128 bytes), and its demo time |
-| 13 | matchdate | `demo_ms uv | raw[rest]`: the first svc_print whose text starts with `matchdate:` (KTX `match.c`, `matchdate: %Y-%m-%d %H:%M:%S %Z`, sent at match start): the text after the prefix up to the newline, trimmed, verbatim (at most 128 bytes), and the demo time of the print |
+| 13 | matchdate | `demo_ms uv | raw[rest]`: the first svc_print whose text starts with `matchdate:` (KTX `match.c`, `matchdate: %Y-%m-%d %H:%M:%S %Z`, sent at match start): the text after the prefix up to the newline, trimmed, verbatim (at most 128 bytes), and the demo time of the print. Only the first `matchdate:` print counts, even if its text is empty |
 | 14 | pauses | `truncated u8 (0 or 1) | count uv (1..65536) | count x { demo_ms uv, paused_ms uv }`, demo_ms strictly increasing: the paused periods (§3.1) |
-| 15 | matchkey | `demo_ms uv | raw[rest]`: the first svc_print whose text starts with `matchkey:` (older mods, e.g. `matchkey: 8-2003-6-15:16-58-0`, sent at match start): the text after the prefix up to the newline, verbatim, and the demo time of the print. Servers split this line over several prints, so the text of the prints that follow is joined until a newline (or 256 bytes); the result is trimmed and cut to 128 bytes |
+| 15 | matchkey | `demo_ms uv | raw[rest]`: the first svc_print whose text starts with `matchkey:` (older mods, e.g. `matchkey: 8-2003-6-15:16-58-0`, sent at match start): the text after the prefix up to the newline, verbatim, and the demo time of the print. Servers split this line over several prints, so the svc_prints that directly follow it in the same frame (no other command between) are joined to it until a newline; at most 256 bytes after the prefix are joined. The result is trimmed and cut to 128 bytes. Only the first `matchkey:` print counts, even if its text is empty |
 | 16 | players | `truncated u8 (0 or 1) | start uv | count uv (<= 65536) | count x { demo_ms uv, slot uv (< 256), kind u8, change }`, demo_ms non-decreasing, `start <= count`, `count >= 1` unless `truncated` = 1: every change to a player slot's userinfo, in demo order, verbatim. kind 0 is an svc_updateuserinfo, change = `userid uv (< 2^32) | len uv | userinfo[len]` (the whole string up to its NUL; empty when the slot is freed); kind 1 is an svc_setinfo, change = `klen uv | key[klen] | vlen uv | value[vlen]`. `start` is the number of changes before the first svc_playerinfo (all of them if there is none). At most 65536 changes and 1 MiB of userinfo, key and value bytes in total; `truncated` = 1 if the demo has more (the list then stops at the first change that does not fit) |
 
 **Checked by a full decode** (§5.5): sha256, size and timing must match the
@@ -265,6 +267,8 @@ metadata) gets the CRC check but not these; it must not treat the identity
 as authenticated.
 
 Tags 11-16 are present only when the demo has the corresponding data.
+*Trimmed* (tags 13, 15) means leading and trailing bytes 0x09, 0x0A,
+0x0C, 0x0D and 0x20 are removed.
 
 **Roster.** Replaying the svc_updateuserinfo changes of tag 16 gives
 the slot table (slot -> (userid, userinfo)) at any point; the first
@@ -273,7 +277,11 @@ spectators present when the demo starts playing), which the reference
 reports as `roster`, leaving out empty slots. Changes after `start` are
 joins, reconnects (a new userid in the slot), drops (an empty userinfo)
 and setinfo updates. Spectators are marked by their userinfo
-(`*spectator`); MVDZ does not interpret it.
+(`*spectator`); MVDZ does not interpret it. The roster comes from the
+svc_updateuserinfo changes only (svc_setinfo changes before `start` are
+not applied to it). If the log is `truncated` and `start` = `count`, the
+first svc_playerinfo may lie beyond the cut and the roster may be
+incomplete.
 
 **Encoder caps** (`format.rs:Metadata::from_scan`, `encode`). The reference
 leaves out a value that is too large, so the META stays small: tags 4-6

@@ -49,6 +49,14 @@ hostile-zstd-legacy.mvdz	error: corrupt: zstd data	-	META as a legacy (v0.7) zst
 hostile-zstd-window.mvdz	error: corrupt: zstd data	-	a zstd segment whose frame declares a 2^40-byte window
 hostile-share-empty.mvdz	error: corrupt: demoinfo share	-	a segment flagged as sharing demoinfo with an empty share
 hostile-meta-no-timing.mvdz	error: corrupt: metadata identity	-	META without tag 8 (timing)
+hostile-players-start.mvdz	error: corrupt: metadata	-	tag 16 with start > count
+hostile-players-kind.mvdz	error: corrupt: metadata	-	tag 16 change of kind 2
+hostile-players-empty.mvdz	error: corrupt: metadata	-	tag 16 with no changes and not truncated
+hostile-players-order.mvdz	error: corrupt: player log order	-	tag 16 with demo_ms going back
+hostile-players-slot.mvdz	error: corrupt: metadata	-	tag 16 with slot 256
+hostile-players-trailing.mvdz	error: corrupt: metadata	-	tag 16 with a byte after its changes
+hostile-players-dup.mvdz	error: corrupt: duplicate metadata tag	-	tag 16 twice
+hostile-matchkey-long.mvdz	error: corrupt: metadata	-	tag 15 with 129 bytes of text
 hostile-ucmd-grid.mvdz	error: corrupt: structure	-	a usercmd block whose grid flags symbol is 9 (stored streams)
 hostile-ucmd-misc.mvdz	error: corrupt: structure	-	a usercmd block (type 1, 23 bytes) stored in hid.misc, no uc stream
 hostile-tables-no-entry.mvdz	error: corrupt: back end 3 without a TABLES model	-	TABLES without the entry of a stream the segments code with back end 3

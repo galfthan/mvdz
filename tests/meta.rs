@@ -398,3 +398,68 @@ fn player_log_truncated() {
     assert_eq!(pl.changes.len(), mvdz::meta::PLAYER_LOG_MAX);
     assert_eq!(pl.start, pl.changes.len());
 }
+
+/// A `matchkey:` line joins only the prints that directly follow it in
+/// its frame: a print in a later frame, or after another command, is not
+/// part of it (FORMAT.md §3 tag 15).
+#[test]
+fn matchkey_join_stays_in_frame() {
+    let mk = |frames: &[Vec<u8>]| {
+        let mut d = Demo(Vec::new());
+        for f in frames {
+            d.frame(10, 6, f);
+        }
+        let c = mvdz::compress(&d.0, &c0()).unwrap();
+        assert_eq!(readers_agree(&c, "matchkey frames").unwrap(), d.0);
+        mvdz::read_metadata(Cursor::new(&c))
+            .unwrap()
+            .meta
+            .clock
+            .matchkey
+            .map(|x| x.1)
+    };
+    let print = |t: &str| s(8, &[&[2], &z(t)]);
+    // the line ends with its frame
+    let got = mk(&[print("matchkey: 8-2005-8-13:19-56-18"), print("bob: hi\n")]);
+    assert_eq!(got.as_deref(), Some(&b"8-2005-8-13:19-56-18"[..]));
+    // another command ends it
+    let f = [
+        print("matchkey: 8-2005-"),
+        s(51, &[&[0], &z("k"), &z("v")]),
+        print("x\n"),
+    ]
+    .concat();
+    assert_eq!(mk(&[f]).as_deref(), Some(&b"8-2005-"[..]));
+    // an empty first line counts; later lines do not
+    let got = mk(&[print("matchkey:\n"), print("matchkey: 1-2005-1-1:1-1-1\n")]);
+    assert_eq!(got.as_deref(), Some(&b""[..]));
+}
+
+/// Truncation before the first svc_playerinfo: `start` = `count`, as the
+/// spec says, so readers know the roster may be incomplete; the Writer
+/// gives the same player log as one-shot compression.
+#[test]
+fn player_log_truncated_before_playerinfo_and_writer() {
+    let mut d = Demo(Vec::new());
+    let one = s(51, &[&[0], &z("k"), &z("v")]);
+    for _ in 0..(mvdz::meta::PLAYER_LOG_MAX / 100 + 1) {
+        d.frame(1, 6, &one.repeat(100));
+    }
+    d.frame(
+        1,
+        6,
+        &s(40, &[&[1], &5u32.to_le_bytes(), &z("\\name\\late")]),
+    );
+    d.frame(1, 6, &s(42, &[&[0], &[0, 0], &[0]]));
+    let demo = d.0;
+    let c = mvdz::compress(&demo, &cfg(Level::Normal, 1 << 16)).unwrap();
+    let pl = mvdz::read_metadata(Cursor::new(&c)).unwrap().meta.players;
+    assert!(pl.truncated && pl.start == pl.changes.len());
+    let mut w = mvdz::stream::StreamEncoder::new(Vec::new(), &cfg(Level::Normal, 1 << 16)).unwrap();
+    for ch in demo.chunks(5000) {
+        w.write_demo(ch).unwrap();
+    }
+    let wc = w.finish().unwrap();
+    let wpl = mvdz::read_metadata(Cursor::new(&wc)).unwrap().meta.players;
+    assert_eq!(wpl, pl);
+}

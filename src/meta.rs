@@ -83,7 +83,8 @@ impl PlayerLog {
     }
 }
 
-/// bytes of a split `matchkey:` line joined before trimming and the cap
+/// bytes after the prefix of a split `matchkey:` line joined before
+/// trimming and the cap
 const MATCHKEY_JOIN: usize = 2 * CLOCK_STR_LEN;
 
 /// Wall-clock facts of a demo, each with the demo time (ms) it appeared at.
@@ -347,6 +348,8 @@ impl Scanner {
     }
 
     fn frame(&mut self, f: &[u8], off: u64) {
+        // a `matchkey:` line joins only the prints of its own frame
+        self.matchkey_close();
         self.frames += 1;
         self.t_ms += f[0] as u64;
         let ty = f[1];
@@ -463,6 +466,10 @@ impl Scanner {
     }
 
     fn command(&mut self, cmd: u8, b: &[u8], dest: u64) {
+        // ... that directly follow it
+        if cmd != 8 {
+            self.matchkey_close();
+        }
         match cmd {
             8 => {
                 self.print[(b[0] as usize).min(4)] += 1;
