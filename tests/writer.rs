@@ -121,7 +121,16 @@ fn demoinfo_early_in_a_stream() {
     let st = stream(&demo, &cfg(Level::Normal, 4096));
     assert_eq!(readers_agree(&st, "early demoinfo").unwrap(), demo);
     let m = mvdz::read_metadata(Cursor::new(&st)).unwrap().meta;
-    assert_eq!(m.demoinfo_json().unwrap(), b"{\"x\":1}");
+    let want: Vec<u8> = b
+        .iter()
+        .flat_map(|x| {
+            (x.len() as u32)
+                .to_le_bytes()
+                .into_iter()
+                .chain(x.iter().copied())
+        })
+        .collect();
+    assert_eq!(m.demoinfo, want);
 }
 
 // ---------------------------------------------------------------- C API handles

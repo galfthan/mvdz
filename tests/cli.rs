@@ -1,5 +1,5 @@
 //! The command-line tool: gzip input and output, inputs that are not
-//! demos, the census of raw demos, and a closed standard output.
+//! demos, and a closed standard output.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -201,37 +201,6 @@ fn gunzip_limit() {
     ));
 }
 
-/// The census of a raw demo (plain or gzip) agrees with the census of its
-/// .mvdz, the demoinfo column included.
-#[test]
-fn census_of_raw_demos() {
-    let d = tmp("census");
-    let z = vector("demoinfo-multi.normal.mvdz");
-    let raw = mvdz::decompress(&z, 1).unwrap();
-    std::fs::write(d.join("a.mvdz"), &z).unwrap();
-    std::fs::write(d.join("a.mvd"), &raw).unwrap();
-    std::fs::write(d.join("a.mvd.gz"), gzip(&raw)).unwrap();
-    let r = run(&[Path::new("census"), &d]);
-    assert!(r.status.success(), "{r:?}");
-    let lines: Vec<serde_json::Value> = String::from_utf8(r.stdout)
-        .unwrap()
-        .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
-    assert_eq!(lines.len(), 3);
-    for l in &lines {
-        assert_eq!(l["demoinfo"], true, "{l}");
-        assert_eq!(l["sha256"], lines[0]["sha256"]);
-        assert_eq!(l["census"], lines[0]["census"]);
-    }
-    // a demo without KTX demoinfo still says false
-    std::fs::write(d.join("a.mvd"), demo("float-fte.normal.mvdz")).unwrap();
-    let r = run(&[Path::new("census"), &d.join("a.mvd")]);
-    let l: serde_json::Value = serde_json::from_slice(&r.stdout).unwrap();
-    assert_eq!(l["demoinfo"], false);
-    let _ = std::fs::remove_dir_all(&d);
-}
-
 /// Every command that writes to standard output stops quietly when the
 /// reader goes away.
 #[test]
@@ -241,11 +210,8 @@ fn closed_stdout_is_quiet() {
     let d = tmp("pipe");
     let raw = d.join("duel.mvd");
     std::fs::write(&raw, demo("duel.normal.mvdz")).unwrap();
-    let dirs: Vec<&Path> = (0..200).map(|_| vectors.as_path()).collect();
     let infos: Vec<&Path> = (0..2000).map(|_| duel.as_path()).collect();
     let cases: Vec<Vec<&Path>> = vec![
-        [&[Path::new("census")][..], &dirs].concat(),
-        [&[Path::new("census"), Path::new("--tsv")][..], &dirs].concat(),
         [&[Path::new("info")][..], &infos].concat(),
         vec![Path::new("decompress"), &duel, Path::new("-")],
         vec![Path::new("compress"), &raw, Path::new("-")],

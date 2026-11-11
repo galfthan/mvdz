@@ -68,7 +68,7 @@ func v1meta_(body []byte) *v1meta {
 	for fr.left() > 0 {
 		tag := fr.uv()
 		v := fr.take(fr.uv())
-		if tag >= 1 && tag <= 14 {
+		if tag >= 1 && tag <= 5 {
 			if seen[tag] {
 				fail("dup tag")
 			}
@@ -93,52 +93,11 @@ func v1meta_(body []byte) *v1meta {
 				f.take(uint64(f.u32()))
 			}
 			m.demoinfo = v
-		case 7:
-			c := f.uv()
-			if c > 256 {
-				fail("roster")
-			}
-			last := -1
-			for i := uint64(0); i < c; i++ {
-				s := f.uv()
-				u := f.uv()
-				f.take(f.uv())
-				if s > 255 || u > 0xFFFFFFFF || int(s) <= last {
-					fail("roster")
-				}
-				last = int(s)
-			}
-		case 8:
+		case 4:
 			m.duration = f.uv()
 			m.frames = f.uv()
 			m.tmng = true
-		case 9:
-			v1checkUTF8(v)
-		case 11:
-			f.uv()
-			f.uv()
-		case 12, 13:
-			f.uv()
-			if f.left() > 128 {
-				fail("clock string")
-			}
-			f.take(uint64(f.left()))
-		case 14:
-			tr := f.u8()
-			c := f.uv()
-			if tr > 1 || c == 0 || c > 65536 {
-				fail("pauses")
-			}
-			var last uint64
-			for i := uint64(0); i < c; i++ {
-				t := f.uv()
-				if i > 0 && t <= last {
-					fail("pause order")
-				}
-				last = t
-				f.uv()
-			}
-		case 10:
+		case 5:
 			c := f.uv()
 			keys := map[string]bool{}
 			for i := uint64(0); i < c; i++ {
@@ -153,7 +112,7 @@ func v1meta_(body []byte) *v1meta {
 		default:
 			continue
 		}
-		if (tag == 2 || tag == 7 || tag == 8 || tag == 10 || tag == 11 || tag == 14) && f.left() != 0 {
+		if (tag == 2 || tag == 4 || tag == 5) && f.left() != 0 {
 			fail("tag value not consumed")
 		}
 	}

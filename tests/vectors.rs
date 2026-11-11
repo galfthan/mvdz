@@ -359,12 +359,14 @@ fn hostile(v: &mut Vec<Vector>) {
         build(0, true, &pp, true),
         "a model header followed by 64 zero bytes (not consumed exactly)",
     );
-    // META fields as a zstd bomb: 16 MiB of serverinfo in a few KB (the
-    // ratio limit)
-    let mut bomb = meta.clone();
-    bomb.serverinfo = vec![1u8; (1 << 24) - (1 << 16)];
+    // META fields as a zstd bomb: 16 MiB of an unassigned tag in a few KB
+    // (the ratio limit)
+    let mut bomb = meta_fields(&meta);
+    put_uv(&mut bomb, 4);
+    put_uv(&mut bomb, (1 << 24) - (1 << 16));
+    bomb.resize(bomb.len() + (1 << 24) - (1 << 16), 1);
     let mut sb = secs.clone();
-    sb[0] = (K_META, meta_body(&meta_fields(&bomb), true));
+    sb[0] = (K_META, meta_body(&bomb, true));
     add(
         "meta-ratio",
         build(0, true, &sb, true),
@@ -440,7 +442,7 @@ fn hostile(v: &mut Vec<Vector>) {
     add(
         "meta-no-timing",
         build(0, true, &st8, true),
-        "META without tag 8 (timing)",
+        "META without tag 4 (timing)",
     );
     // one usercmd block in a segment of stored streams built by hand
     let mut one = Demo(Vec::new());
@@ -712,7 +714,7 @@ fn meta_body(p: &[u8], zstd: bool) -> Vec<u8> {
 }
 
 /// A synthetic demo carrying the 0x000B start timestamp in the 8-byte u64le
-/// form of older mvdsv builds (FORMAT.md §3 tag 11).
+/// form of older mvdsv builds.
 fn start_u64() -> Vec<u8> {
     let mut d = Demo(Vec::new());
     d.hidden(0, &[(0x0b, &1_778_675_998_090u64.to_le_bytes())]);
@@ -912,13 +914,11 @@ fn all_vectors() -> Option<Vec<Vector>> {
     );
     let su = start_u64();
     let sc = one(&su, c(Level::Normal, 0));
-    let fi = mvdz::read_metadata(std::io::Cursor::new(&sc)).unwrap();
-    assert_eq!(fi.meta.clock.start_ms.map(|x| x.1), Some(1_778_675_998_090));
     add(
         "start-u64.normal.mvdz",
         sc,
         &su,
-        "synthetic demo with a 0x000B start timestamp in the 8-byte u64le form (META tag 11 = 1778675998090)",
+        "synthetic demo with a 0x000B start timestamp (1778675998090) in the 8-byte u64le form of older mvdsv builds",
     );
     let uc = usercmd_demo();
     add(

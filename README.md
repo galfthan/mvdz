@@ -3,10 +3,12 @@
 **mvdz** is a lossless compressor and file format for QuakeWorld MVD demos
 (`.mvd`). An `.mvdz` file is about a fifth of the raw demo and a third of
 the demo's gzip, decodes back to the exact original bytes (checked by
-SHA-256), can be read sequentially from a pipe or seeked by demo time, and
-carries the demo's metadata (identity hash, server info, roster, a census
-of its contents, wall-clock time) so catalogues can read it without
-decoding.
+SHA-256), and can be read sequentially from a pipe or seeked by demo time.
+Its small header holds the demo's identity hash, size and duration.
+
+What a demo contains (map, server info, players joining and leaving, the
+match date) is read from the demo itself by a separate tool, `mvdz-meta`,
+which takes `.mvdz`, `.mvd` and `.mvd.gz` alike.
 
 It comes as a command-line tool, a Rust library, a C library (static or
 shared, for engines such as ezQuake and FTE) and builds for WebAssembly.
@@ -44,7 +46,7 @@ its own file system callbacks as it plays.
 
 **Linux binaries.** Each release on GitHub has static Linux binaries
 (x86-64, any distribution), with the C library and header beside the
-`mvdz` tool, and a `SHA256SUMS` file:
+`mvdz` and `mvdz-meta` tools, and a `SHA256SUMS` file:
 
 | download | for |
 |---|---|
@@ -57,7 +59,9 @@ and a C compiler (for the bundled libzstd).
 ```
 git clone https://github.com/galfthan/mvdz && cd mvdz
 cargo build --release            # target/release/mvdz, libmvdz.a, libmvdz.so
+cargo build --release -p mvdz-meta   # target/release/mvdz-meta
 cargo install --path .           # or: put mvdz on your PATH
+cargo install --path meta        # and mvdz-meta
 ```
 
 The default build runs on any CPU of its architecture. Building for the
@@ -75,7 +79,8 @@ mvdz compress *.mvd.gz                       # every file, several at once
 mvdz compress -s 0 game.mvd                  # one segment: smallest, cannot seek
 mvdz compress --fast -s 1M game.mvd          # faster both ways, larger segments
 mvdz decompress game.mvdz                    # -> game.mvd (--gzip: game.mvd.gz)
-mvdz info game.mvdz | jq .sha256             # metadata, without decoding
+mvdz info game.mvdz | jq .sha256             # identity, without decoding
+mvdz-meta game.mvdz                          # map, players, date (decodes)
 ```
 
 ### Segments: 256 KiB by default, or `-s 0`
@@ -150,8 +155,7 @@ mvdz compress   [--fast] [-s size] [-j threads] [--ext key=value]... [--allow-no
                 [-f] [--rm] files... | in out.mvdz | -o out.mvdz in
 mvdz decompress [-j threads] [--max-memory size] [--trusted] [--gzip | --no-gzip]
                 [-f] [--rm] files... | in.mvdz out | -o out in.mvdz
-mvdz info       file.mvdz...                 metadata and index as JSON
-mvdz census     [--tsv] files-or-dirs...     census of .mvdz / .mvd / .mvd.gz files
+mvdz info       file.mvdz...                 identity, timing and index as JSON
 mvdz bench      [--levels normal,fast] [-s size] [-r reps] [-j threads] [--trusted] files...
 ```
 
@@ -172,13 +176,13 @@ the whole demo in one segment (a file holds at most 65536 segments, so the
 default covers demos up to about 16 GiB). Compression decodes its own output and compares before writing
 anything. `--trusted` skips the SHA-256 identity check (see above); use it
 only for files whose identity you verified before. `info` prints the JSON
-described in FORMAT.md §3.2.
+described in FORMAT.md §3.1.
 
 ```
 mvdz compress game.mvd
 mvdz compress --fast -s 1M -o game.fast.mvdz game.mvd
 mvdz decompress --gzip demos/*.mvdz
-mvdz info game.mvdz | jq .map
+mvdz info game.mvdz | jq .duration_ms
 ```
 
 **gzip.** `compress` takes a raw `.mvd` or a gzip-compressed one
@@ -201,7 +205,24 @@ written. Truncated demos and demos damaged after their start compress as
 before, with what does not parse stored raw. A few archive files that
 carry a demo after a non-MVD header are refused too; `--allow-non-demo`
 stores any input (it still round-trips, mostly stored raw). When standard output
-closes early (`mvdz census demos/ | head`), the tool stops quietly.
+closes early (`mvdz info *.mvdz | head`), the tool stops quietly.
+
+**What a demo contains: `mvdz-meta`.**
+
+```
+mvdz-meta [--json] files-or-dirs...
+```
+
+Shows, for each demo (`.mvdz` decoded first, `.mvd.gz` gunzipped), the
+map and server settings, the wall-clock sources (the server's start
+timestamp, `epoch`, KTX `matchdate:`, older mods' `matchkey:`), pauses,
+the players at the start and every later change (joins, spectators,
+drops, reconnects, renames, setinfo), and whether KTX stats are present.
+`--json` writes one object per demo and line with the raw strings, the
+KTX demoinfo JSON and a census of the demo's messages. A directory means
+the demos directly in it. The output is informative and may change
+between versions ([meta/README.md](meta/README.md)); none of it is stored
+in the `.mvdz`.
 
 ## Hashes and trust
 
@@ -315,7 +336,7 @@ hostile files through every reader including the C interface, and through
 the Go conformance decoder when Go is installed), round trips at both
 levels, segmented and streamed, corrupt-input and hostile-file tests,
 metadata tests, and the regressions of the pre-release
-reviews. `cargo test --features pure-zstd` runs them with the pure-Rust
+reviews; `cargo test --workspace` adds the `mvdz-meta` tests. `cargo test --features pure-zstd` runs them with the pure-Rust
 zstd decoder. Everything runs on synthetic demos; tests that can also use
 real demos read them from the directory in `MVDZ_TEST_DATA` (subdirectory
 `sample/` with demos named `<sha256>.mvd`, `gen/` with constructed demos,
@@ -334,8 +355,8 @@ against 0.211 for mvdz normal: mvdz files are about 2.6 times smaller
 than zstd -19 and 2.2 times smaller than xz ([BENCHMARKS.md](BENCHMARKS.md)).
 A general-purpose compressor sees bytes; mvdz parses the demo, puts each
 field in its own stream and codes positions and angles as residuals
-against predictions. The container also gives seeking by demo time,
-metadata without decoding and the demo's identity hash.
+against predictions. The container also gives seeking by demo time and
+the demo's identity hash without decoding.
 
 **What is the licence?** MIT ([LICENSE](LICENSE)), and every dependency is
 permissive (MIT, Apache-2.0 or BSD). MIT code can be linked into GPL
