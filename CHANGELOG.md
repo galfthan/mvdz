@@ -6,6 +6,14 @@
   (older mods' match start stamp, e.g. `8-2003-6-15:16-58-0`), joined
   over the prints a server splits the line into; also in `mvdz info` and
   the census `clock`. Readers that do not know tag 15 skip it.
+* META tag 16 `players` replaces tag 7 (the roster snapshot, now
+  unassigned): every svc_updateuserinfo and svc_setinfo in demo order,
+  verbatim, with how many come before the first svc_playerinfo. Joins,
+  reconnects, drops, spectators and setinfo changes are visible without
+  decoding the demo; `Metadata::roster()` and `roster` in `mvdz info`
+  rebuild the old snapshot from it. Capped at 65536 changes and 1 MiB of
+  strings (`truncated`). `Metadata::roster` the field is now
+  `Metadata::players`.
 * The time sources are raw values only: FORMAT.md §3.1 no longer defines
   how to parse `epoch` or `matchdate`, a ranking of the sources, or a
   wall-clock base. It describes what each source means and how pauses

@@ -11,6 +11,7 @@
 
 use crate::budget::{Budget, Charge};
 use crate::error::{Error, Result, bad};
+use crate::meta::{InfoChange, PLAYER_LOG_BYTES, PLAYER_LOG_MAX};
 use crate::util::{Rd, crc32, put_uv, usz};
 
 pub const MAGIC: &[u8; 4] = b"MVDZ";
@@ -52,7 +53,6 @@ pub const DIR_MAX: u64 = 1 << 24;
 pub const TABLES_MAX: u64 = 1 << 24;
 /// Encoder caps for metadata values (FORMAT.md, "Metadata").
 pub const META_VALUE_MAX: usize = 1 << 16;
-pub const ROSTER_VALUE_MAX: usize = 1 << 12;
 pub const DEMOINFO_MAX: usize = 4 << 20;
 pub const EXT_MAX: usize = 1 << 20;
 
@@ -183,7 +183,7 @@ pub const T_DEMOINFO: u64 = 3;
 pub const T_SERVERINFO: u64 = 4;
 pub const T_LEVELNAME: u64 = 5;
 pub const T_MAP: u64 = 6;
-pub const T_ROSTER: u64 = 7;
+// tag 7 (a roster snapshot in earlier drafts) is unassigned: tag 16 has it
 pub const T_TIMING: u64 = 8;
 pub const T_CENSUS: u64 = 9;
 pub const T_EXT: u64 = 10;
@@ -192,7 +192,8 @@ pub const T_EPOCH: u64 = 12;
 pub const T_MATCHDATE: u64 = 13;
 pub const T_PAUSES: u64 = 14;
 pub const T_MATCHKEY: u64 = 15;
-const N_TAGS: usize = 16;
+pub const T_PLAYERS: u64 = 16;
+const N_TAGS: usize = 17;
 
 /// Demo metadata (the META section), raw facts only.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -208,8 +209,8 @@ pub struct Metadata {
     pub levelname: Vec<u8>,
     /// first modellist entry (the map model)
     pub map: Vec<u8>,
-    /// (slot, userid, userinfo) at the first playerinfo
-    pub roster: Vec<(u8, u32, Vec<u8>)>,
+    /// every userinfo change, and where the first playerinfo falls
+    pub players: crate::meta::PlayerLog,
     pub duration_ms: u64,
     pub frames: u64,
     /// census JSON
@@ -259,17 +260,19 @@ impl Metadata {
             serverinfo: cap(s.serverinfo),
             levelname: cap(s.levelname),
             map: cap(s.map),
-            roster: s
-                .roster
-                .into_iter()
-                .filter(|r| !r.2.is_empty() && r.2.len() <= ROSTER_VALUE_MAX)
-                .collect(),
+            players: s.players,
             duration_ms: s.duration_ms,
             frames: s.frames,
             census: s.census,
             ext,
             clock: s.clock,
         }
+    }
+
+    /// The roster: each slot's userid and userinfo at the first
+    /// svc_playerinfo, rebuilt from the player log (tag 16).
+    pub fn roster(&self) -> Vec<(u8, u32, Vec<u8>)> {
+        self.players.roster()
     }
 
     /// The META section body, zstd at the normal level's setting.
@@ -296,14 +299,6 @@ impl Metadata {
         field(T_LEVELNAME, &self.levelname);
         field(T_MAP, &self.map);
         let mut v = Vec::new();
-        put_uv(&mut v, self.roster.len() as u64);
-        for (s, u, i) in &self.roster {
-            put_uv(&mut v, *s as u64);
-            put_uv(&mut v, *u as u64);
-            put_bytes(&mut v, i);
-        }
-        field(T_ROSTER, &v);
-        let mut v = Vec::new();
         put_uv(&mut v, self.duration_ms);
         put_uv(&mut v, self.frames);
         field(T_TIMING, &v);
@@ -326,6 +321,29 @@ impl Metadata {
                 v.extend_from_slice(raw);
                 field(tag, &v);
             }
+        }
+        let pl = &self.players;
+        if !pl.changes.is_empty() || pl.truncated {
+            let mut v = vec![pl.truncated as u8];
+            put_uv(&mut v, pl.start as u64);
+            put_uv(&mut v, pl.changes.len() as u64);
+            for (t, s, ch) in &pl.changes {
+                put_uv(&mut v, *t);
+                put_uv(&mut v, *s as u64);
+                match ch {
+                    InfoChange::User { userid, info } => {
+                        v.push(0);
+                        put_uv(&mut v, *userid as u64);
+                        put_bytes(&mut v, info);
+                    }
+                    InfoChange::Set { key, value } => {
+                        v.push(1);
+                        put_bytes(&mut v, key);
+                        put_bytes(&mut v, value);
+                    }
+                }
+            }
+            field(T_PLAYERS, &v);
         }
         if !c.pauses.is_empty() {
             let mut v = vec![c.pauses_truncated as u8];
@@ -413,21 +431,45 @@ impl Metadata {
                 T_SERVERINFO => m.serverinfo = v.to_vec(),
                 T_LEVELNAME => m.levelname = v.to_vec(),
                 T_MAP => m.map = v.to_vec(),
-                T_ROSTER => {
+                T_PLAYERS => {
+                    let tr = f.u8().ok_or(e)?;
+                    let start = f.uz().ok_or(e)?;
                     let n = f.uz().ok_or(e)?;
-                    if n > 256 {
+                    // every change takes at least 5 bytes
+                    if tr > 1
+                        || n > PLAYER_LOG_MAX
+                        || n > v.len() / 5
+                        || start > n
+                        || (n == 0 && tr == 0)
+                    {
                         return Err(e);
                     }
-                    let mut last: Option<u8> = None;
+                    let pl = &mut m.players;
+                    pl.truncated = tr == 1;
+                    pl.start = start;
+                    let mut bytes = 0usize;
                     for _ in 0..n {
-                        let s = u8::try_from(f.uv().ok_or(e)?).map_err(|_| e)?;
-                        let u = f.u32v().ok_or(e)?;
-                        let i = f.bytes().ok_or(e)?;
-                        if last.is_some_and(|l| s <= l) {
-                            return bad("roster order");
+                        let t = f.uv().ok_or(e)?;
+                        if pl.changes.last().is_some_and(|l| t < l.0) {
+                            return bad("player log order");
                         }
-                        last = Some(s);
-                        m.roster.push((s, u, i.to_vec()));
+                        let s = u8::try_from(f.uv().ok_or(e)?).map_err(|_| e)?;
+                        let c = match f.u8().ok_or(e)? {
+                            0 => InfoChange::User {
+                                userid: f.u32v().ok_or(e)?,
+                                info: f.bytes().ok_or(e)?.to_vec(),
+                            },
+                            1 => InfoChange::Set {
+                                key: f.bytes().ok_or(e)?.to_vec(),
+                                value: f.bytes().ok_or(e)?.to_vec(),
+                            },
+                            _ => return Err(e),
+                        };
+                        bytes += c.str_len();
+                        if bytes > PLAYER_LOG_BYTES {
+                            return Err(e);
+                        }
+                        pl.changes.push((t, s, c));
                     }
                 }
                 T_TIMING => {
@@ -485,7 +527,7 @@ impl Metadata {
             // a known tag's value is consumed exactly
             if matches!(
                 tag,
-                T_SIZE | T_ROSTER | T_TIMING | T_EXT | T_START_MS | T_PAUSES
+                T_SIZE | T_PLAYERS | T_TIMING | T_EXT | T_START_MS | T_PAUSES
             ) && !f.done()
             {
                 return Err(e);
@@ -501,7 +543,9 @@ impl Metadata {
     /// budget for keeping it).
     pub fn heap_size(&self) -> u64 {
         let ext: usize = self.ext.iter().map(|(k, v)| k.len() + v.len() + 48).sum();
-        let roster: usize = self.roster.iter().map(|r| r.2.len() + 32).sum();
+        let roster: usize = (self.players.changes.iter())
+            .map(|c| c.2.str_len() + 48)
+            .sum();
         let c = &self.clock;
         let clock = c.epoch.as_ref().map_or(0, |x| x.1.len())
             + c.matchdate.as_ref().map_or(0, |x| x.1.len())

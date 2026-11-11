@@ -223,6 +223,7 @@ struct JInfo {
     levelname: String,
     serverinfo: String,
     roster: Vec<JRoster>,
+    players: serde_json::Value,
     demoinfo: Option<String>,
     ext: serde_json::Map<String, serde_json::Value>,
     census: Option<Box<serde_json::value::RawValue>>,
@@ -275,7 +276,7 @@ impl FileInfo {
             levelname: latin1(&m.levelname),
             serverinfo: latin1(&m.serverinfo),
             roster: m
-                .roster
+                .roster()
                 .iter()
                 .map(|(s, u, i)| JRoster {
                     slot: *s,
@@ -290,6 +291,20 @@ impl FileInfo {
                 .map(|(k, v)| (k.clone(), serde_json::Value::String(latin1(v))))
                 .collect(),
             census,
+            players: {
+                use crate::meta::InfoChange;
+                let p = &m.players;
+                serde_json::json!({
+                    "truncated": p.truncated,
+                    "start": p.start,
+                    "changes": p.changes.iter().map(|(t, s, c)| match c {
+                        InfoChange::User { userid, info } => serde_json::json!(
+                            {"t": t, "slot": s, "userid": userid, "userinfo": latin1(info)}),
+                        InfoChange::Set { key, value } => serde_json::json!(
+                            {"t": t, "slot": s, "key": latin1(key), "value": latin1(value)}),
+                    }).collect::<Vec<_>>(),
+                })
+            },
             clock: {
                 let c = &m.clock;
                 serde_json::json!({

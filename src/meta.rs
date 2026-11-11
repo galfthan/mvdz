@@ -26,6 +26,63 @@ pub const LINE_LEN: usize = 1 << 16;
 /// Wall-clock sources and pauses (FORMAT.md §3.1): caps.
 pub const CLOCK_STR_LEN: usize = 128;
 pub const PAUSE_RUNS_MAX: usize = 1 << 16;
+/// Player log (FORMAT.md §3 tag 16): caps on changes and on string bytes.
+pub const PLAYER_LOG_MAX: usize = 1 << 16;
+pub const PLAYER_LOG_BYTES: usize = 1 << 20;
+
+/// One change to a slot's userinfo, as the demo sends it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InfoChange {
+    /// svc_updateuserinfo: the slot's userid and whole userinfo string
+    /// (empty: the slot was freed)
+    User { userid: u32, info: Vec<u8> },
+    /// svc_setinfo: one key of the slot's userinfo
+    Set { key: Vec<u8>, value: Vec<u8> },
+}
+
+impl InfoChange {
+    /// String bytes counted against [`PLAYER_LOG_BYTES`].
+    pub fn str_len(&self) -> usize {
+        match self {
+            InfoChange::User { info, .. } => info.len(),
+            InfoChange::Set { key, value } => key.len() + value.len(),
+        }
+    }
+}
+
+/// Every userinfo change of the demo, in demo order (FORMAT.md §3 tag 16).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PlayerLog {
+    /// (demo_ms, slot, change)
+    pub changes: Vec<(u64, u8, InfoChange)>,
+    /// changes before the first svc_playerinfo (all of them if none)
+    pub start: usize,
+    /// more changes existed than the caps allow: the list stops there
+    pub truncated: bool,
+}
+
+impl PlayerLog {
+    /// The slot table (slot, userid, userinfo) after the first `n`
+    /// changes, from the svc_updateuserinfo ones; freed slots left out.
+    pub fn slots_at(&self, n: usize) -> Vec<(u8, u32, Vec<u8>)> {
+        let mut t: BTreeMap<u8, (u32, &[u8])> = BTreeMap::new();
+        for (_, s, c) in self.changes.iter().take(n) {
+            if let InfoChange::User { userid, info } = c {
+                t.insert(*s, (*userid, info));
+            }
+        }
+        t.into_iter()
+            .filter(|(_, (_, i))| !i.is_empty())
+            .map(|(s, (u, i))| (s, u, i.to_vec()))
+            .collect()
+    }
+
+    /// The roster: the slot table at the first svc_playerinfo.
+    pub fn roster(&self) -> Vec<(u8, u32, Vec<u8>)> {
+        self.slots_at(self.start)
+    }
+}
+
 /// bytes of a split `matchkey:` line joined before trimming and the cap
 const MATCHKEY_JOIN: usize = 2 * CLOCK_STR_LEN;
 
@@ -185,8 +242,9 @@ pub struct Scanner {
     sd_first: Option<(u32, u32, u32, u32, Vec<u8>, Vec<u8>)>,
     /// first fullserverinfo string, verbatim
     pub serverinfo: Option<Vec<u8>>,
-    roster: BTreeMap<u8, (u32, Vec<u8>)>,
-    roster_start: Option<BTreeMap<u8, (u32, Vec<u8>)>>,
+    players: PlayerLog,
+    player_bytes: usize,
+    playerinfo_seen: bool,
     demo_start_ts: Option<u64>,
     clock: Clock,
     /// a `matchkey:` line still waiting for its newline
@@ -257,8 +315,9 @@ impl Scanner {
             serverdata: 0,
             sd_first: None,
             serverinfo: None,
-            roster: BTreeMap::new(),
-            roster_start: None,
+            players: PlayerLog::default(),
+            player_bytes: 0,
+            playerinfo_seen: false,
             demo_start_ts: None,
             matchkey_open: None,
             clock: Clock::default(),
@@ -365,6 +424,21 @@ impl Scanner {
             }
             i += 6 + bl;
         }
+    }
+
+    /// Logs one userinfo change; past the caps the log stops (truncated).
+    fn player(&mut self, slot: u8, c: InfoChange) {
+        let pl = &mut self.players;
+        if pl.truncated {
+            return;
+        }
+        let n = c.str_len();
+        if pl.changes.len() == PLAYER_LOG_MAX || self.player_bytes + n > PLAYER_LOG_BYTES {
+            pl.truncated = true;
+            return;
+        }
+        self.player_bytes += n;
+        pl.changes.push((self.t_ms, slot, c));
     }
 
     /// Adds the text of one print to the open `matchkey:` line; a newline
@@ -485,11 +559,18 @@ impl Scanner {
                         }
                     }
                 }
-                self.roster.insert(slot, (uid, s));
+                self.player(
+                    slot,
+                    InfoChange::User {
+                        userid: uid,
+                        info: s,
+                    },
+                );
             }
             42 => {
-                if self.roster_start.is_none() {
-                    self.roster_start = Some(self.roster.clone());
+                if !self.playerinfo_seen {
+                    self.playerinfo_seen = true;
+                    self.players.start = self.players.changes.len();
                 }
             }
             45 | 46 => {
@@ -512,7 +593,18 @@ impl Scanner {
                     i += s.len() + 1;
                 }
             }
-            51 => self.setinfo_updates += 1,
+            51 => {
+                self.setinfo_updates += 1;
+                if let Some((&slot, rest)) = b.split_first() {
+                    let key = str_at(rest);
+                    let value = str_at(rest.get(key.len() + 1..).unwrap_or(&[]));
+                    let c = InfoChange::Set {
+                        key: key.to_vec(),
+                        value: value.to_vec(),
+                    };
+                    self.player(slot, c);
+                }
+            }
             52 => {
                 self.serverinfo_updates += 1;
                 let k = str_at(b);
@@ -599,10 +691,9 @@ impl Scanner {
         self.matchkey_close();
         let digest: [u8; 32] = std::mem::take(&mut self.sha).finalize().into();
         let census = self.census_json();
-        let roster = self
-            .roster_start
-            .clone()
-            .unwrap_or_else(|| self.roster.clone());
+        if !self.playerinfo_seen {
+            self.players.start = self.players.changes.len();
+        }
         let (map, level) = {
             let m = self.modellist.first().cloned().unwrap_or_default();
             (
@@ -622,7 +713,7 @@ impl Scanner {
             serverinfo: self.serverinfo.take().unwrap_or_default(),
             levelname: level,
             map,
-            roster: roster.into_iter().map(|(s, (u, i))| (s, u, i)).collect(),
+            players: std::mem::take(&mut self.players),
             demoinfo: std::mem::take(&mut self.demoinfo),
             census,
             clock: std::mem::take(&mut self.clock),
@@ -821,8 +912,7 @@ pub struct Scan {
     pub serverinfo: Vec<u8>,
     pub levelname: Vec<u8>,
     pub map: Vec<u8>,
-    /// (slot, userid, userinfo) at the first playerinfo (else at the end)
-    pub roster: Vec<(u8, u32, Vec<u8>)>,
+    pub players: PlayerLog,
     pub demoinfo: Vec<u8>,
     pub census: String,
     pub clock: Clock,

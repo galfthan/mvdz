@@ -68,7 +68,7 @@ func v1meta_(body []byte) *v1meta {
 	for fr.left() > 0 {
 		tag := fr.uv()
 		v := fr.take(fr.uv())
-		if tag >= 1 && tag <= 15 {
+		if tag >= 1 && tag <= 16 {
 			if seen[tag] {
 				fail("dup tag")
 			}
@@ -93,21 +93,6 @@ func v1meta_(body []byte) *v1meta {
 				f.take(uint64(f.u32()))
 			}
 			m.demoinfo = v
-		case 7:
-			c := f.uv()
-			if c > 256 {
-				fail("roster")
-			}
-			last := -1
-			for i := uint64(0); i < c; i++ {
-				s := f.uv()
-				u := f.uv()
-				f.take(f.uv())
-				if s > 255 || u > 0xFFFFFFFF || int(s) <= last {
-					fail("roster")
-				}
-				last = int(s)
-			}
 		case 8:
 			m.duration = f.uv()
 			m.frames = f.uv()
@@ -123,6 +108,44 @@ func v1meta_(body []byte) *v1meta {
 				fail("clock string")
 			}
 			f.take(uint64(f.left()))
+		case 16:
+			tr := f.u8()
+			start := f.uv()
+			c := f.uv()
+			if tr > 1 || c > 65536 || c > uint64(len(v)/5) || start > c || (c == 0 && tr == 0) {
+				fail("player log")
+			}
+			var last, bytes uint64
+			for i := uint64(0); i < c; i++ {
+				t := f.uv()
+				if i > 0 && t < last {
+					fail("player log order")
+				}
+				last = t
+				if f.uv() > 255 {
+					fail("player log")
+				}
+				switch f.u8() {
+				case 0:
+					if f.uv() > 0xFFFFFFFF {
+						fail("player log")
+					}
+					n := f.uv()
+					f.take(n)
+					bytes += n
+				case 1:
+					n := f.uv()
+					f.take(n)
+					k := f.uv()
+					f.take(k)
+					bytes += n + k
+				default:
+					fail("player log")
+				}
+				if bytes > 1<<20 {
+					fail("player log")
+				}
+			}
 		case 14:
 			tr := f.u8()
 			c := f.uv()
@@ -153,7 +176,7 @@ func v1meta_(body []byte) *v1meta {
 		default:
 			continue
 		}
-		if (tag == 2 || tag == 7 || tag == 8 || tag == 10 || tag == 11 || tag == 14) && f.left() != 0 {
+		if (tag == 2 || tag == 16 || tag == 8 || tag == 10 || tag == 11 || tag == 14) && f.left() != 0 {
 			fail("tag value not consumed")
 		}
 	}

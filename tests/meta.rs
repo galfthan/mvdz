@@ -26,9 +26,9 @@ fn metadata_and_census() {
         b"\\map\\dm4\\hostname\\test server\\deathmatch\\3"
     );
     assert_eq!(m.map, b"maps/dm4.bsp");
-    assert_eq!(m.roster.len(), 2);
+    assert_eq!(m.roster().len(), 2);
     assert_eq!(
-        m.roster[1],
+        m.roster()[1],
         (3, 9, b"\\name\\bob\\team\\blue\\*client\\fte".to_vec())
     );
     assert!(m.demoinfo.is_empty() && m.demoinfo_json().is_none());
@@ -322,4 +322,79 @@ fn matchkey_raw_joined() {
         m.clock.matchkey,
         Some((5, b"8-2005-8-13:19-56-18".to_vec()))
     );
+}
+
+fn userinfo(slot: u8, uid: u32, info: &str) -> Vec<u8> {
+    s(40, &[&[slot], &uid.to_le_bytes(), &z(info)])
+}
+
+/// The player log (FORMAT.md §3 tag 16): every userinfo change in demo
+/// order, with the roster rebuilt at the first svc_playerinfo; joins,
+/// spectators, setinfo, drops and reconnects after it stay in the log.
+#[test]
+fn player_log() {
+    let mut d = Demo(Vec::new());
+    let mut p = Vec::new();
+    p.extend(userinfo(0, 7, "\\name\\alice\\team\\red"));
+    p.extend(userinfo(1, 8, "\\name\\watcher\\*spectator\\1"));
+    p.extend(userinfo(2, 9, "\\name\\bob\\team\\red"));
+    d.frame(0, 6, &p);
+    // svc_playerinfo: slot, flags (none), frame
+    d.frame(10, 6, &s(42, &[&[0], &[0, 0], &[0]]));
+    d.frame(10, 6, &s(51, &[&[2], &z("team"), &z("blue")]));
+    d.frame(10, 6, &userinfo(2, 9, ""));
+    d.frame(10, 6, &userinfo(2, 12, "\\name\\bob\\team\\blue"));
+    d.frame(10, 6, &userinfo(3, 13, "\\name\\carol\\team\\red"));
+    let demo = d.0;
+    for level in [Level::Normal, Level::Fast] {
+        let c = mvdz::compress(&demo, &cfg(level, 0)).unwrap();
+        assert_eq!(readers_agree(&c, "players").unwrap(), demo);
+        let fi = mvdz::read_metadata(Cursor::new(&c)).unwrap();
+        let pl = &fi.meta.players;
+        assert!(!pl.truncated);
+        assert_eq!(pl.start, 3);
+        assert_eq!(pl.changes.len(), 7);
+        assert_eq!(
+            pl.changes[3],
+            (
+                20,
+                2,
+                mvdz::meta::InfoChange::Set {
+                    key: b"team".to_vec(),
+                    value: b"blue".to_vec()
+                }
+            )
+        );
+        let r = fi.meta.roster();
+        assert_eq!(
+            r.iter().map(|x| (x.0, x.1)).collect::<Vec<_>>(),
+            vec![(0, 7), (1, 8), (2, 9)]
+        );
+        let end = pl.slots_at(pl.changes.len());
+        assert_eq!(
+            end.iter().map(|x| (x.0, x.1)).collect::<Vec<_>>(),
+            vec![(0, 7), (1, 8), (2, 12), (3, 13)]
+        );
+        let j: serde_json::Value = serde_json::from_str(&fi.to_json()).unwrap();
+        assert_eq!(j["players"]["start"], 3);
+        assert_eq!(j["players"]["changes"][4]["userinfo"], "");
+        assert_eq!(j["roster"][1]["userinfo"], "\\name\\watcher\\*spectator\\1");
+    }
+}
+
+/// Past 65536 changes the player log stops and says so.
+#[test]
+fn player_log_truncated() {
+    let mut d = Demo(Vec::new());
+    let one = s(51, &[&[0], &z("k"), &z("v")]);
+    for _ in 0..(mvdz::meta::PLAYER_LOG_MAX / 100 + 1) {
+        d.frame(1, 6, &one.repeat(100));
+    }
+    let demo = d.0;
+    let c = mvdz::compress(&demo, &c0()).unwrap();
+    assert_eq!(readers_agree(&c, "players cap").unwrap(), demo);
+    let pl = mvdz::read_metadata(Cursor::new(&c)).unwrap().meta.players;
+    assert!(pl.truncated);
+    assert_eq!(pl.changes.len(), mvdz::meta::PLAYER_LOG_MAX);
+    assert_eq!(pl.start, pl.changes.len());
 }

@@ -247,7 +247,7 @@ fields := { tag uv | len uv | value[len] }*                  (exactly raw_len by
 | 4 | serverinfo | the first `fullserverinfo` string, verbatim (the quoted part of the stufftext `fullserverinfo "\k\v..."`); empty if none |
 | 5 | levelname | the level name of the first svc_serverdata, verbatim |
 | 6 | map | the first svc_modellist entry (e.g. `maps/dm4.bsp`), verbatim |
-| 7 | roster | `count uv (<= 256) | count x { slot uv (< 256), userid uv (< 2^32), len uv, userinfo[len] }`, slots strictly ascending: each slot's svc_updateuserinfo as of the first svc_playerinfo of the demo (or the end of the demo if there is none) |
+| 7 | (unassigned) | a roster snapshot in earlier drafts, now part of tag 16; skipped like any unknown tag |
 | 8 | timing | `duration_ms uv | frames uv`: the demo's total frame time and frame count |
 | 9 | census | UTF-8 text (invalid UTF-8 is an error): a JSON object describing the demo (§3.3); informative |
 | 10 | ext | `count uv | count x { klen uv, key[klen] (UTF-8), vlen uv, value[vlen] }`, keys unique (bytewise): extension key/values given at compress time (e.g. `source`, `hub_game_id`, `captured`); not part of the demo bytes |
@@ -256,6 +256,7 @@ fields := { tag uv | len uv | value[len] }*                  (exactly raw_len by
 | 13 | matchdate | `demo_ms uv | raw[rest]`: the first svc_print whose text starts with `matchdate:` (KTX `match.c`, `matchdate: %Y-%m-%d %H:%M:%S %Z`, sent at match start): the text after the prefix up to the newline, trimmed, verbatim (at most 128 bytes), and the demo time of the print |
 | 14 | pauses | `truncated u8 (0 or 1) | count uv (1..65536) | count x { demo_ms uv, paused_ms uv }`, demo_ms strictly increasing: the paused periods (§3.1) |
 | 15 | matchkey | `demo_ms uv | raw[rest]`: the first svc_print whose text starts with `matchkey:` (older mods, e.g. `matchkey: 8-2003-6-15:16-58-0`, sent at match start): the text after the prefix up to the newline, verbatim, and the demo time of the print. Servers split this line over several prints, so the text of the prints that follow is joined until a newline (or 256 bytes); the result is trimmed and cut to 128 bytes |
+| 16 | players | `truncated u8 (0 or 1) | start uv | count uv (<= 65536) | count x { demo_ms uv, slot uv (< 256), kind u8, change }`, demo_ms non-decreasing, `start <= count`, `count >= 1` unless `truncated` = 1: every change to a player slot's userinfo, in demo order, verbatim. kind 0 is an svc_updateuserinfo, change = `userid uv (< 2^32) | len uv | userinfo[len]` (the whole string up to its NUL; empty when the slot is freed); kind 1 is an svc_setinfo, change = `klen uv | key[klen] | vlen uv | value[vlen]`. `start` is the number of changes before the first svc_playerinfo (all of them if there is none). At most 65536 changes and 1 MiB of userinfo, key and value bytes in total; `truncated` = 1 if the demo has more (the list then stops at the first change that does not fit) |
 
 **Checked by a full decode** (§5.5): sha256, size and timing must match the
 decoded demo; a mismatch is an error ("identity mismatch", "demo timing").
@@ -263,12 +264,20 @@ A reader that does not decode the demo (a catalogue reading only the
 metadata) gets the CRC check but not these; it must not treat the identity
 as authenticated.
 
-Tags 11-15 are present only when the demo has the corresponding data.
+Tags 11-16 are present only when the demo has the corresponding data.
+
+**Roster.** Replaying the svc_updateuserinfo changes of tag 16 gives
+the slot table (slot -> (userid, userinfo)) at any point; the first
+`start` changes give it at the first svc_playerinfo (the players and
+spectators present when the demo starts playing), which the reference
+reports as `roster`, leaving out empty slots. Changes after `start` are
+joins, reconnects (a new userid in the slot), drops (an empty userinfo)
+and setinfo updates. Spectators are marked by their userinfo
+(`*spectator`); MVDZ does not interpret it.
 
 **Encoder caps** (`format.rs:Metadata::from_scan`, `encode`). The reference
 leaves out a value that is too large, so the META stays small: tags 4-6
-over 64 KiB are written empty; roster entries whose userinfo is over 4 KiB
-are left out; demoinfo blocks are shared (tag 3) only while the store stays
+over 64 KiB are written empty; the player log stops at its caps (tag 16); demoinfo blocks are shared (tag 3) only while the store stays
 within 4 MiB (later blocks stay in their segments); extension keys and
 values over 1 MiB in total, or a duplicate key, make compression fail
 before anything is written. META is zstd-compressed only when that is
@@ -346,7 +355,8 @@ One object per file, keys in this order:
 | `sha256`, `size` | tags 1 and 2 (hex; integer) |
 | `duration_ms`, `frames` | tag 8 |
 | `map`, `levelname`, `serverinfo` | tags 6, 5, 4 (Latin-1 strings) |
-| `roster` | tag 7: `[{slot, userid, userinfo}]` |
+| `roster` | from tag 16, as above: `[{slot, userid, userinfo}]` |
+| `players` | tag 16: `{truncated, start, changes: [{t, slot, userid, userinfo} or {t, slot, key, value}]}` |
 | `demoinfo` | the reassembled demoinfo JSON (§3), as a Latin-1 string, or `null` |
 | `ext` | tag 10: `{key: Latin-1 string}` |
 | `census` | tag 9 (an object) or `null` |
@@ -442,10 +452,9 @@ At most 64 keys; further new keys only increment `overflow`. A
 `fullserverinfo` command also feeds `serverinfo_keys`, and the first one is
 the META serverinfo (tag 4).
 
-**Roster cut point.** The roster is the slot table (slot -> (userid,
-userinfo string up to its NUL)) of svc_updateuserinfo commands, copied when
-the first svc_playerinfo command is met (or at the end of the demo); slots
-with an empty userinfo are left out.
+**Player log.** Tag 16 lists every svc_updateuserinfo and svc_setinfo
+command in demo order; `start` counts those before the first
+svc_playerinfo command.
 
 ---------------------------------------------------------------------------
 
@@ -1769,7 +1778,7 @@ checks; the hostile vectors each break one rule only.
 | model decisions (M2) | `<= 128 x header length + 1024` | §8.3 |
 | META fields | 2^24 bytes | §3 |
 | INDEX, TABLES sections | 2^24 bytes | §4, §2.6 |
-| roster | 256 entries | §3 |
+| player log | 65536 changes, 1 MiB of strings | §3 |
 | META ratio | `raw_len <= 1024 x L + 4096` (L: META body length) | §3 |
 | rANS model header | consumed exactly | §8.3 |
 | zstd frames | window <= `max(N, 2^20)`, no legacy frames | §1 |
@@ -1788,7 +1797,7 @@ checks (META extension keys) must not be quadratic: a META of 2^24 bytes
 can hold millions of keys. A decoder must never
 abort the process on a declared size.
 
-**What is not checked.** Census content; roster, serverinfo, levelname
+**What is not checked.** Census content; player log, serverinfo, levelname
 and map against the demo. A reader that does
 not decode the demo does not verify the identity (§13).
 
