@@ -1,0 +1,17 @@
+[package]
+name = "mvdz-meta"
+version = "1.0.0-rc.4"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+description = "What a QuakeWorld MVD demo contains: map, players, clock, census (reads .mvd, .mvd.gz and .mvdz)"
+repository = "https://github.com/galfthan/mvdz"
+publish = false
+
+[dependencies]
+mvdz = { path = ".." }
+sha2 = "0.10"
+serde_json = "1"
+
+[lints]
+workspace = true

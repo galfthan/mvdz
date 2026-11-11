@@ -53,7 +53,7 @@ pub struct Info {
 }
 
 /// Checks what can be checked of a configuration before any work: the
-/// extension metadata (FORMAT.md §3, tag 10).
+/// extension metadata (FORMAT.md §3, tag 5).
 pub fn check_config(cfg: &Config) -> Result<()> {
     check_ext(&cfg.ext)
 }
@@ -158,7 +158,7 @@ fn compress_inner(src: &[u8], cfg: &Config, force_raw: bool) -> Result<(Vec<u8>,
             "segment over 4 GiB: use a smaller segment size",
         ));
     }
-    let md0 = Metadata::from_scan(crate::meta::scan(src), cfg.ext.clone());
+    let md0 = Metadata::new(crate::ident::Ident::of(src), cfg.ext.clone());
     let (mut proto, mut t, mut dt) = (Proto::default(), 0u64, 0usize);
     let plans = plan(src, &cuts, &mut proto, &mut t, &mut dt);
     // a segmented file at the normal level: one model per rANS stream from

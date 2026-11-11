@@ -155,13 +155,13 @@ int mvdz_seek_time(mvdz_reader *r, uint64_t ms, uint64_t *seg_start_ms, uint64_t
 int mvdz_seek_segment(mvdz_reader *r, size_t segment, uint64_t *raw_offset);
 void mvdz_close(mvdz_reader *r);
 
-/* Metadata (identity, server info, roster, census, index) as a
- * NUL-terminated JSON string (FORMAT.md §3.2), read without decoding the
- * demo; the section structure is checked. The identity is what the file
- * claims: only a full decode verifies it. *json_n
- * excludes the NUL; free with mvdz_free(json, *json_n). Byte strings are
- * rendered as Latin-1 (each byte is the code point of the same value).
- * The JSON counts against max_memory. */
+/* Metadata (identity, timing, extension keys, index) as a NUL-terminated
+ * JSON string (FORMAT.md §3.1), read without decoding the demo; the
+ * section structure is checked. The identity is what the file claims:
+ * only a full decode verifies it. *json_n excludes the NUL; free with
+ * mvdz_free(json, *json_n). Extension values are rendered as Latin-1 (each
+ * byte is the code point of the same value). The JSON counts against
+ * max_memory. */
 int mvdz_info_json(mvdz_read_fn read, mvdz_seek_fn seek, void *user, uint64_t max_memory, char **json,
                    size_t *json_n);
 int mvdz_info_json_memory(const void *buf, size_t n, uint64_t max_memory, char **json, size_t *json_n);
@@ -191,7 +191,7 @@ int mvdz_info_json_memory(const void *buf, size_t n, uint64_t max_memory, char *
 mvdz_writer *mvdz_writer_open(mvdz_write_fn write, void *user, int level, size_t segment,
                               int *err);
 int mvdz_writer_write(mvdz_writer *w, const void *data, size_t n);
-/* Sets an extension metadata key (FORMAT.md §3, tag 10; e.g. a match id
+/* Sets an extension metadata key (FORMAT.md §3, tag 5; e.g. a match id
  * or where the demo came from) to n bytes at value, replacing an earlier
  * value of the same key. key is UTF-8, NUL-terminated. Call it any time
  * before mvdz_writer_finish. A key that would take the extension metadata

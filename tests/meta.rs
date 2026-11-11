@@ -1,4 +1,4 @@
-//! Metadata, census and forward compatibility. Synthetic
+//! Metadata and forward compatibility. Synthetic
 //! demos are built here, so most of these run without the demo cache.
 
 mod common;
@@ -13,53 +13,47 @@ fn c0() -> mvdz::Config {
 
 // ---------------------------------------------------------------- metadata
 
+/// The META section holds what decoding needs (identity, timing, the
+/// shared demoinfo store) and the extension key/values; the JSON
+/// rendering shows the same, and nothing of the demo's content.
 #[test]
-fn metadata_and_census() {
+fn metadata_is_container_only() {
     let demo = synthetic(&[], false);
-    let c = mvdz::compress(&demo, &c0()).unwrap();
+    let mut c0 = c0();
+    c0.ext = vec![("match".into(), b"42".to_vec())];
+    let c = mvdz::compress(&demo, &c0).unwrap();
     assert_eq!(mvdz::decompress(&c, 1).unwrap(), demo);
     let fi = mvdz::read_metadata(Cursor::new(&c)).unwrap();
-    let json: serde_json::Value = serde_json::from_str(&fi.to_json()).unwrap();
-    let m = fi.meta;
+    let id = mvdz::ident::Ident::of(&demo);
+    let m = &fi.meta;
+    assert_eq!(m.size, demo.len() as u64);
+    assert_eq!((m.frames, m.duration_ms), (id.frames, id.duration_ms));
+    assert!(m.frames > 0 && m.duration_ms > 0);
+    assert_eq!(m.ext, vec![("match".to_string(), b"42".to_vec())]);
+    assert!(m.demoinfo.is_empty());
+    let j: serde_json::Value = serde_json::from_str(&fi.to_json()).unwrap();
+    let mut keys: Vec<&str> = j.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+    keys.sort();
     assert_eq!(
-        m.serverinfo,
-        b"\\map\\dm4\\hostname\\test server\\deathmatch\\3"
+        keys,
+        [
+            "duration_ms",
+            "ext",
+            "file_size",
+            "frames",
+            "segments",
+            "sha256",
+            "size",
+            "streamed",
+            "version"
+        ]
     );
-    assert_eq!(m.map, b"maps/dm4.bsp");
-    assert_eq!(m.roster.len(), 2);
-    assert_eq!(
-        m.roster[1],
-        (3, 9, b"\\name\\bob\\team\\blue\\*client\\fte".to_vec())
-    );
-    assert!(m.demoinfo.is_empty() && m.demoinfo_json().is_none());
-    let cs: serde_json::Value = serde_json::from_str(&m.census).unwrap();
-    let cmds = &cs["stufftext"]["commands"];
-    assert_eq!(
-        cmds["topcolor"]["count"], 50,
-        "fragmented stufftext reassembled"
-    );
-    assert_eq!(cmds["_cs"]["count"], 100, "';' splits commands");
-    assert_eq!(cmds["wait"]["count"], 50);
-    assert_eq!(
-        cmds["//ktx took"]["count"], 50,
-        "a word after // is part of the key"
-    );
-    assert_eq!(cmds["//finalscores"]["count"], 50, "a quoted date is not");
-    assert_eq!(cs["print"]["2"], 50);
-    assert_eq!(cs["truncated"], false);
-    assert_eq!(
-        cs["client_values"]["*client"],
-        serde_json::json!(["ezQuake 7", "fte"])
-    );
-    assert_eq!(json["map"], "maps/dm4.bsp");
-    assert_eq!(json["census"]["frames"], cs["frames"]);
-    assert_eq!(json["size"], demo.len());
+    assert_eq!(j["size"], demo.len());
+    assert_eq!(j["ext"]["match"], "42");
 }
 
 #[test]
-fn demoinfo_multi_block_round_trip() {
-    // blocks 1, 2, 0; then a second, newer copy: the last block of each
-    // number wins, as in the mvd_analyzer project
+fn demoinfo_store_round_trip() {
     let parts = [
         (1, "{\"a\":1,"),
         (2, "\"b\":2"),
@@ -74,8 +68,8 @@ fn demoinfo_multi_block_round_trip() {
             let c = mvdz::compress(&demo, &cfg(level, seg)).unwrap();
             assert_eq!(readers_agree(&c, "demoinfo").unwrap(), demo);
             let m = mvdz::read_metadata(Cursor::new(&c)).unwrap().meta;
-            assert_eq!(m.demoinfo_json().unwrap(), b"{\"a\":3,\"b\":4}");
-            assert!(m.census.contains("\"0x0003\":[6,"));
+            // the six blocks, each [u32 len][u16 number][text]
+            assert_eq!(m.demoinfo.len(), 6 * 6 + 26);
             // the demo stream references the metadata copy, which carries a
             // CRC: damaging it makes every reader refuse the file
             let meta_off = u64::from_le_bytes(c[8..16].try_into().unwrap()) as usize;
@@ -88,17 +82,11 @@ fn demoinfo_multi_block_round_trip() {
 }
 
 #[test]
-fn truncated_demo_round_trips_and_is_flagged() {
+fn truncated_demo_round_trips() {
     let demo = synthetic(&[], true);
     for seg in [0, 200] {
         let c = mvdz::compress(&demo, &cfg(Level::Normal, seg)).unwrap();
         assert_eq!(readers_agree(&c, "truncated").unwrap(), demo);
-        let m = mvdz::read_metadata(Cursor::new(&c)).unwrap().meta;
-        assert!(
-            m.census.contains("\"truncated\":true,\"tail_bytes\":4"),
-            "{}",
-            m.census
-        );
     }
     if let Some(d) = duel() {
         // one byte holds no frame: refused as a non-demo
@@ -107,45 +95,6 @@ fn truncated_demo_round_trips_and_is_flagged() {
         for cut in [1000, 123_457, d.len() / 2 + 3, d.len() - 1] {
             let c = mvdz::compress(&d[..cut], &cfg(Level::Normal, 65536)).unwrap();
             assert_eq!(mvdz::decompress(&c, 2).unwrap(), &d[..cut], "cut {cut}");
-        }
-    }
-}
-
-/// Newline-free stufftext used to make the census scan quadratic
-/// (correctness review F6: 51 s for 5000 messages).
-#[test]
-fn census_scan_is_linear() {
-    let mut d = Demo(Vec::new());
-    let msg = s(9, &[&z(&"x".repeat(999))]);
-    for _ in 0..20_000 {
-        d.frame(0, 6, &msg);
-    }
-    let t = std::time::Instant::now();
-    let sc = mvdz::meta::scan(&d.0);
-    assert!(
-        t.elapsed().as_secs_f64() < 5.0,
-        "census scan took {:?}",
-        t.elapsed()
-    );
-    assert!(sc.census.contains("\"messages\":20000"));
-}
-
-/// A census that is not a JSON object cannot inject keys into the JSON
-/// rendering (robustness review 10).
-#[test]
-fn census_json_cannot_inject() {
-    let demo = synthetic(&[], false);
-    let c = mvdz::compress(&demo, &c0()).unwrap();
-    let fi = mvdz::read_metadata(Cursor::new(&c)).unwrap();
-    for census in ["{}, \"sha256\": \"00\", \"x\": {", "}", "[1]", "{\"ok\":1}"] {
-        let mut fi = fi.clone();
-        fi.meta.census = census.into();
-        let j: serde_json::Value = serde_json::from_str(&fi.to_json()).unwrap();
-        assert_eq!(j["sha256"], mvdz::api::hex(&fi.meta.sha256));
-        if census.starts_with("{\"ok") {
-            assert_eq!(j["census"]["ok"], 1);
-        } else {
-            assert!(j["census"].is_null());
         }
     }
 }
@@ -207,6 +156,12 @@ fn unknown_sections_and_fields() {
     mvdz::util::put_uv(&mut payload, 999);
     mvdz::util::put_uv(&mut payload, 3);
     payload.extend_from_slice(b"new");
+    // tags above 5 are skipped whatever their value, and may repeat
+    for t in [6u64, 6, 8, 14] {
+        mvdz::util::put_uv(&mut payload, t);
+        mvdz::util::put_uv(&mut payload, 2);
+        payload.extend_from_slice(&[0xff, 0xff]);
+    }
     let mut body = vec![1u8, 0];
     mvdz::util::put_uv(&mut body, payload.len() as u64);
     body.extend_from_slice(&mvdz::util::crc32(&payload).to_le_bytes());
@@ -245,49 +200,5 @@ fn readers_skip_unknown_sections_without_reading_them() {
         std::io::Read::read_to_end(&mut r, &mut out).unwrap();
         assert_eq!(out, demo);
         mvdz::read_metadata_with(Cursor::new(b), &limits).unwrap();
-    }
-}
-
-/// Wall-clock sources and pauses (FORMAT.md §3.1): the 0x000B start stamp,
-/// the serverinfo `epoch`, the KTX `matchdate:` print, and paused frames
-/// in mvdsv's bare form and the framed form, merged into runs.
-#[test]
-fn wall_clock_sources() {
-    let mut d = Demo(Vec::new());
-    d.frame(
-        0,
-        6,
-        &s(
-            9,
-            &[&z("fullserverinfo \"\\epoch\\1780776295\\map\\dm2\"\n")],
-        ),
-    );
-    let mut ts = Vec::new();
-    mvdz::util::put_uv(&mut ts, 1_780_776_295_225);
-    d.hidden(98, &[(0x0b, &ts[..])]);
-    d.frame(
-        100,
-        6,
-        &s(8, &[&[2], &z("matchdate: 2026-06-06 20:05:05 UTC\n")]),
-    );
-    for ms in [100u8, 50] {
-        // bare: [u16 0x000A][u8 ms]
-        d.0.extend_from_slice(&[0, 3, 0, 0, 0, 0, 3, 0, 0, 0, 0x0a, 0, ms]);
-    }
-    d.frame(20, 6, &s(8, &[&[2], &z("x\n")]));
-    d.hidden(0, &[(0x0a, &[7u8][..])]);
-    d.frame(5, 6, &s(8, &[&[2], &z("y\n")]));
-    let demo = d.0;
-    for level in [Level::Normal, Level::Fast] {
-        let c = mvdz::compress(&demo, &cfg(level, 0)).unwrap();
-        assert_eq!(readers_agree(&c, "clock").unwrap(), demo);
-        let m = mvdz::read_metadata(Cursor::new(&c)).unwrap().meta;
-        assert_eq!(m.clock.start_ms, Some((98, 1_780_776_295_225)));
-        assert_eq!(m.clock.epoch, Some((0, b"1780776295".to_vec())));
-        assert_eq!(
-            m.clock.matchdate,
-            Some((198, b"2026-06-06 20:05:05 UTC".to_vec()))
-        );
-        assert_eq!(m.clock.pauses, vec![(198, 150), (218, 7)]);
     }
 }

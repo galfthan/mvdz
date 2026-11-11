@@ -45,7 +45,7 @@ pub fn check_demo(src: &[u8]) -> Result<()> {
     if is_gzip(src) {
         return Err(Error::NotMvd("gzip-compressed data"));
     }
-    if !crate::meta::starts_like_mvd(src) {
+    if !crate::ident::starts_like_mvd(src) {
         return Err(Error::NotMvd("the first frame does not parse"));
     }
     Ok(())
@@ -197,13 +197,6 @@ fn latin1(b: &[u8]) -> String {
 }
 
 #[derive(serde::Serialize)]
-struct JRoster {
-    slot: u8,
-    userid: u32,
-    userinfo: String,
-}
-
-#[derive(serde::Serialize)]
 struct JSeg {
     t_start_ms: u64,
     raw_offset: u64,
@@ -219,14 +212,7 @@ struct JInfo {
     size: u64,
     duration_ms: u64,
     frames: u64,
-    map: String,
-    levelname: String,
-    serverinfo: String,
-    roster: Vec<JRoster>,
-    demoinfo: Option<String>,
     ext: serde_json::Map<String, serde_json::Value>,
-    census: Option<Box<serde_json::value::RawValue>>,
-    clock: serde_json::Value,
     segments: Vec<JSeg>,
 }
 
@@ -255,14 +241,10 @@ impl FileInfo {
 
     /// JSON rendering, refused with a limit error once it would exceed
     /// `max` bytes: escaping can make it up to six times the metadata
-    /// (FORMAT.md §3.2). Byte strings (map, serverinfo, userinfo, demoinfo,
-    /// extension values) are Latin-1: each byte becomes the code point of
-    /// the same value. The census is included only if it is a JSON object.
+    /// (FORMAT.md §3.1). Extension values are Latin-1: each byte becomes
+    /// the code point of the same value.
     pub fn to_json_with(&self, max: usize) -> Result<String> {
         let m = &self.meta;
-        let census = serde_json::from_str::<Box<serde_json::value::RawValue>>(&m.census)
-            .ok()
-            .filter(|r| r.get().trim_start().starts_with('{'));
         let j = JInfo {
             version: VERSION,
             streamed: self.flags & F_STREAMED != 0,
@@ -271,35 +253,11 @@ impl FileInfo {
             size: m.size,
             duration_ms: m.duration_ms,
             frames: m.frames,
-            map: latin1(&m.map),
-            levelname: latin1(&m.levelname),
-            serverinfo: latin1(&m.serverinfo),
-            roster: m
-                .roster
-                .iter()
-                .map(|(s, u, i)| JRoster {
-                    slot: *s,
-                    userid: *u,
-                    userinfo: latin1(i),
-                })
-                .collect(),
-            demoinfo: m.demoinfo_json().map(|d| latin1(&d)),
             ext: m
                 .ext
                 .iter()
                 .map(|(k, v)| (k.clone(), serde_json::Value::String(latin1(v))))
                 .collect(),
-            census,
-            clock: {
-                let c = &m.clock;
-                serde_json::json!({
-                    "start_timestamp_ms": c.start_ms.map(|(t, v)| [t, v]),
-                    "epoch": c.epoch.as_ref().map(|(t, v)| serde_json::json!([t, latin1(v)])),
-                    "matchdate": c.matchdate.as_ref().map(|(t, v)| serde_json::json!([t, latin1(v)])),
-                    "pauses": c.pauses.iter().map(|p| [p.0, p.1]).collect::<Vec<_>>(),
-                    "pauses_truncated": c.pauses_truncated,
-                })
-            },
             segments: self
                 .index
                 .segs
