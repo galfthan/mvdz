@@ -155,7 +155,7 @@ int mvdz_seek_time(mvdz_reader *r, uint64_t ms, uint64_t *seg_start_ms, uint64_t
 int mvdz_seek_segment(mvdz_reader *r, size_t segment, uint64_t *raw_offset);
 void mvdz_close(mvdz_reader *r);
 
-/* Metadata (identity, server info, roster, census, index) as a
+/* Metadata (identity, server info, players, time stamps, index) as a
  * NUL-terminated JSON string (FORMAT.md §3.2), read without decoding the
  * demo; the section structure is checked. The identity is what the file
  * claims: only a full decode verifies it. *json_n

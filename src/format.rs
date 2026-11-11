@@ -185,7 +185,7 @@ pub const T_LEVELNAME: u64 = 5;
 pub const T_MAP: u64 = 6;
 // tag 7 (a roster snapshot in earlier drafts) is unassigned: tag 16 has it
 pub const T_TIMING: u64 = 8;
-pub const T_CENSUS: u64 = 9;
+// tag 9 (a census in earlier drafts) is unassigned
 pub const T_EXT: u64 = 10;
 pub const T_START_MS: u64 = 11;
 pub const T_EPOCH: u64 = 12;
@@ -213,8 +213,6 @@ pub struct Metadata {
     pub players: crate::meta::PlayerLog,
     pub duration_ms: u64,
     pub frames: u64,
-    /// census JSON
-    pub census: String,
     /// extension key/values, not part of the demo bytes
     pub ext: Vec<(String, Vec<u8>)>,
     /// wall-clock sources and pauses (FORMAT.md §3.1)
@@ -263,7 +261,6 @@ impl Metadata {
             players: s.players,
             duration_ms: s.duration_ms,
             frames: s.frames,
-            census: s.census,
             ext,
             clock: s.clock,
         }
@@ -302,7 +299,6 @@ impl Metadata {
         put_uv(&mut v, self.duration_ms);
         put_uv(&mut v, self.frames);
         field(T_TIMING, &v);
-        field(T_CENSUS, self.census.as_bytes());
         let c = &self.clock;
         if let Some((t, ms)) = c.start_ms {
             let mut v = Vec::new();
@@ -477,7 +473,6 @@ impl Metadata {
                     m.duration_ms = f.uv().ok_or(e)?;
                     m.frames = f.uv().ok_or(e)?;
                 }
-                T_CENSUS => m.census = String::from_utf8(v.to_vec()).map_err(|_| e)?,
                 T_EXT => {
                     let n = f.uz().ok_or(e)?;
                     // every entry takes at least 2 bytes
@@ -557,7 +552,6 @@ impl Metadata {
             + self.serverinfo.len()
             + self.levelname.len()
             + self.map.len()
-            + self.census.len()
             + ext
             + roster
             + clock) as u64

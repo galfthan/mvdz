@@ -232,12 +232,12 @@ fields := { tag uv | len uv | value[len] }*                  (exactly raw_len by
   segments, §5.1), else an error ("metadata size"). `crc` is the CRC-32C
   of the raw `fields` bytes; a mismatch is an error.
 * Tags 1 to 16 are defined below; each may appear at most once (a
-  duplicate is an error). Tag 7 is unassigned: its value is skipped, but
-  it too may appear at most once. Other tags are skipped (and may
+  duplicate is an error). Tags 7 and 9 are unassigned: their values are
+  skipped, but they too may appear at most once. Other tags are skipped (and may
   repeat).
 * Tags 1 (sha256), 2 (size) and 8 (timing) are required.
 * A defined tag's value must have exactly the grammar given (consumed
-  exactly; strings checked as stated: tags 9 and 10 UTF-8 where the table
+  exactly; strings checked as stated: tag 10 UTF-8 where the table
   says so, tags 12, 13 and 15 at most 128 bytes of `raw`), else the file is
   refused.
 
@@ -251,7 +251,7 @@ fields := { tag uv | len uv | value[len] }*                  (exactly raw_len by
 | 6 | map | the first svc_modellist entry (e.g. `maps/dm4.bsp`), verbatim |
 | 7 | (unassigned) | a roster snapshot in earlier drafts, now part of tag 16; skipped like any unknown tag |
 | 8 | timing | `duration_ms uv | frames uv`: the demo's total frame time and frame count |
-| 9 | census | UTF-8 text (invalid UTF-8 is an error): a JSON object describing the demo (§3.3); informative |
+| 9 | (unassigned) | a census of the demo in earlier drafts; skipped like tag 7 |
 | 10 | ext | `count uv | count x { klen uv, key[klen] (UTF-8), vlen uv, value[vlen] }`, keys unique (bytewise): extension key/values given at compress time (e.g. `source`, `hub_game_id`, `captured`); not part of the demo bytes |
 | 11 | start_timestamp | `demo_ms uv | unix_ms uv`: the value of the first hidden block 0x000B (mvdhidden_demo_start_timestamp_ms: Unix milliseconds when the server opened the demo, mvdsv `sv_demo_misc.c` `SV_MVDEmbedStartTimestamp`) and the demo time it appeared at. The block body has two forms: current mvdsv writes a ULEB128, earlier builds a fixed 8-byte u64le. A body of exactly 8 bytes whose ULEB128 does not end at its 8th byte (a byte below 0x80 earlier) is the u64le; any other body is read as ULEB128 over at most its first 10 bytes, stopping after the first byte below 0x80 or at the end of the body |
 | 12 | epoch | `demo_ms uv | raw[rest]`: the first value of the serverinfo key `epoch` (Unix seconds as decimal text, set by mvdsv when the demo starts, `sv_demo.c`), from the initial `fullserverinfo` or a later svc_serverinfo, verbatim (at most 128 bytes), and its demo time |
@@ -339,8 +339,7 @@ What readers need to know to use them (informative):
   `paused_ms` of wall-clock time. A `truncated` pause list makes `P(t)`
   exact only up to the last run listed.
 
-The census repeats tags 11-13 and 15 and the pause count and total
-(`clock`), so `mvdz census` shows which demos carry which source.
+`mvdz census` lists the sources each demo carries.
 
 ### 3.2 Rendering
 
@@ -348,8 +347,7 @@ The reference renders metadata as JSON (`api.rs:FileInfo::to_json`, CLI
 `mvdz info`, C `mvdz_info_json`) with a serializer: byte strings (map,
 levelname, serverinfo, userinfo, demoinfo, extension values) as JSON
 strings of Latin-1 code points (each byte becomes the code point of the
-same value, so a reader recovers the bytes); the census is embedded only
-if it parses as a JSON object, else as `null`. Nothing a file contains can
+same value, so a reader recovers the bytes). Nothing a file contains can
 add keys to the rendering. Escaping can make the rendering up to six
 times the metadata; the C interface counts it against `max_memory`.
 
@@ -367,98 +365,35 @@ One object per file, keys in this order:
 | `players` | tag 16: `{truncated, start, changes: [{t, slot, userid, userinfo} or {t, slot, key, value}]}` |
 | `demoinfo` | the reassembled demoinfo JSON (§3), as a Latin-1 string, or `null` |
 | `ext` | tag 10: `{key: Latin-1 string}` |
-| `census` | tag 9 (an object) or `null` |
 | `clock` | `{start_timestamp_ms: [demo_ms, unix_ms] or null, epoch: [demo_ms, raw] or null, matchdate: [demo_ms, raw] or null, matchkey: [demo_ms, raw] or null, pauses: [[demo_ms, paused_ms]...], pauses_truncated}` (tags 11-15) |
 | `segments` | the INDEX: `[{t_start_ms, raw_offset, raw_len}]` |
 
 Integers are JSON numbers (a reader that keeps only 53-bit doubles may lose
 precision above 2^53).
 
-### 3.3 Census (informative)
+### 3.3 Scanning the demo (`meta.rs:Scanner`)
 
-A compact JSON object (about 4-8 KB, 1-3 KB after zstd) describing what the
-demo contains, from a scan of every frame and message (`meta.rs:Scanner`).
-Readers must not depend on its exact content; this section describes what
-the reference writes, so other encoders can match it.
-
-Strings are bytes: printable ASCII (0x20-0x7E) as is, with `"` and `\`
-escaped, every other byte as `\u00XX`. Field order is fixed; lists are
-capped. Census strings (list entries, info keys and values, the serverdata
-gamedir and levelname) are cut to 1024 bytes.
-
-```
-census_version   1
-size, frames, duration_ms
-truncated        true if the demo ends in bytes that do not form a whole frame
-tail_bytes       how many
-max_message      largest frame payload (bytes)
-serverdata       {count, protocol, fte_pext, fte_pext2, mvd_pext ("0x%08x"),
-                  gamedir, levelname} of the first svc_serverdata (only count
-                  if there is none)
-svc              {svc_name: [count, bytes]} per svc_* command (bytes incl. the command byte)
-dem              {dem_name: [count, bytes]} per demo frame type (bytes incl. headers)
-hidden           {"0xTTTT": [count, bytes]} per hidden block type (dem_multiple, mask 0)
-demo_start_timestamp_ms   value of the first hidden 0x000B block (as tag 11 reads
-                 it); only if there is one
-clock            {[start_timestamp_ms: [demo_ms, unix_ms]], [epoch: [demo_ms, "raw"]],
-                  [matchdate: [demo_ms, "raw"]], [matchkey: [demo_ms, "raw"]],
-                  pause_runs, paused_ms} as in §3.1
-raw_path         {escapes, bytes[, first, first_offset]}: unparseable data
-                 (unknown or misfitting svc, malformed hidden blocks): count,
-                 bytes, where it first happened ("svc N" or "hidden") and its
-                 byte offset (first and first_offset only if there is one)
-stufftext        {messages, commands: {key: {count, example}}, overflow}
-serverinfo_keys  [names] from fullserverinfo and svc_serverinfo (cap 64)
-userinfo_keys    [names] from svc_updateuserinfo (cap 64)
-client_values    {"*client"|"*version"|"*z_ext": [distinct values]} (cap 16 each)
-updates          {setinfo: svc_setinfo count, serverinfo: svc_serverinfo count,
-                  fullserverinfo: fullserverinfo stufftext count}
-modellist, soundlist          [entries] verbatim, in order (cap 256 each)
-modellist_dropped, soundlist_dropped
-print            {"0".."3"|"other": count} svc_print by level (only levels seen)
-centerprint      count
-```
-
-**Names.** `svc_name` for command c < 56 is entry c of: svc_bad, svc_nop,
-svc_disconnect, svc_updatestat, svc_version, svc_setview, svc_sound,
-svc_time, svc_print, svc_stufftext, svc_setangle, svc_serverdata,
-svc_lightstyle, svc_updatename, svc_updatefrags, svc_clientdata,
-svc_stopsound, svc_updatecolors, svc_particle, svc_damage, svc_spawnstatic,
-svc_spawnbinary, svc_spawnbaseline, svc_temp_entity, svc_setpause,
-svc_signonnum, svc_centerprint, svc_killedmonster, svc_foundsecret,
-svc_spawnstaticsound, svc_intermission, svc_finale, svc_cdtrack,
-svc_sellscreen, svc_smallkick, svc_bigkick, svc_updateping,
-svc_updateentertime, svc_updatestatlong, svc_muzzleflash,
-svc_updateuserinfo, svc_download, svc_playerinfo, svc_nails,
-svc_chokecount, svc_modellist, svc_soundlist, svc_packetentities,
-svc_deltapacketentities, svc_maxspeed, svc_entgravity, svc_setinfo,
-svc_serverinfo, svc_updatepl, svc_nails2, svc_qizmomsg; for c >= 56 it is
-`svc_c` (decimal). `dem_name` for frame type t = `type & 7` is entry t of:
-dem_cmd, dem_read, dem_set, dem_multiple, dem_single, dem_stats, dem_all,
-dem_7. Only names with a non-zero count are listed, in number order.
+The tags taken from the demo (4-6 and 11-16) come from one scan of every
+frame and message.
 
 **Commands and frames.** A frame's payload is parsed with the command
 sizer (§6.2) and the protocol state it tracks (svc_serverdata updates it);
 the first command that is unknown, 0, or does not fit ends the payload's
-parse (an escape: counted in raw_path). Hidden payloads (dem_multiple with
+parse (an escape). Hidden payloads (dem_multiple with
 mask 0) are parsed as blocks `[u32le len][u16le type][len bytes]`; a block
 that does not fit, or whose length is 0, ends the parse (an escape).
 
-**stufftext keys.** svc_stufftext strings (up to their NUL) are appended
+**stufftext lines.** svc_stufftext strings (up to their NUL) are appended
 per destination: dem_all; dem_single, dem_stats and dem_read by their
 target (`type >> 3`); dem_multiple by its mask. The text is cut into lines
 at `\n`, so a command split over several messages is reassembled; a line is
 cut to 65536 bytes (the rest up to its newline is dropped). Each line is
 split at `;` outside double quotes, as the console does, and each command
-trimmed of ASCII whitespace; empty commands are skipped. A command's key
-is its first whitespace-separated token; for a `//` directive (first token
-starting with `//`) the second token is added (`//ktx took`) when it is 1
-to 32 bytes of `a-z`, `0-9`, `_` starting with a letter, so dates, numbers
-and quoted strings never become part of a key. Keys are cut to 64 bytes.
-Each key has a count and one example (its first command, cut to 80 bytes).
-At most 64 keys; further new keys only increment `overflow`. A
-`fullserverinfo` command also feeds `serverinfo_keys`, and the first one is
-the META serverinfo (tag 4).
+trimmed of ASCII whitespace; empty commands are skipped. A command whose first whitespace-separated token is `fullserverinfo`
+carries the server info: the rest of the command, trimmed of ASCII
+whitespace and with a leading and a trailing double quote removed, is
+tag 4 (the first such command); its `epoch` key, like the `epoch` key of
+an svc_serverinfo, feeds tag 12.
 
 **Player log.** Tag 16 lists every svc_updateuserinfo and svc_setinfo
 command in demo order; `start` counts those before the first
@@ -1805,7 +1740,7 @@ checks (META extension keys) must not be quadratic: a META of 2^24 bytes
 can hold millions of keys. A decoder must never
 abort the process on a declared size.
 
-**What is not checked.** Census content; player log, serverinfo, levelname
+**What is not checked.** The player log, serverinfo, levelname
 and map against the demo. A reader that does
 not decode the demo does not verify the identity (§13).
 
@@ -1827,7 +1762,7 @@ The streaming encoder compresses a demo that is still being recorded:
   the last segment.
 * Every segment is self-contained (its models are in its streams; the
   writer never writes TABLES), so the file can be read while it grows.
-* At the end it writes META (now that the identity, census and demoinfo
+* At the end it writes META (now that the identity, player log and demoinfo
   are known), the segments held back (the first segment that shares
   demoinfo and every segment after it: they are coded when they fill and
   kept in memory as coded bytes), INDEX and TRAILER. KTX writes the
@@ -2034,7 +1969,7 @@ offers. mvdz carries them losslessly and does not filter them: lossless
 means unchanged. A client that plays a demo from an untrusted source must
 apply the same command filtering it applies to demos and servers (ezQuake
 and FTE restrict stufftext from demos); tools that display metadata
-(server info, names, the census) must escape it (the reference renders it
+(server info, names, the player log) must escape it (the reference renders it
 as JSON, and the CLI escapes what it prints as text).
 
 **Bit rot.** CRC-32C detects every burst error of up to 32 bits and all

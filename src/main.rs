@@ -27,7 +27,7 @@ fn usage() -> ! {
                   [-f] [--rm] files... | in.mvdz out | -o out in.mvdz
                   game.mvdz -> game.mvd (game.mvd.gz with --gzip) beside it
   mvdz info       file.mvdz...                     metadata and index as JSON
-  mvdz census     [--tsv] files-or-dirs...         census of .mvdz / .mvd / .mvd.gz files
+  mvdz census     [--tsv] files-or-dirs...         scan .mvdz / .mvd / .mvd.gz demos (informative)
   mvdz bench      [--levels normal,fast] [-s size] [-r reps] [-j threads] [--no-verify]
                   [--skip-compress] [--trusted] [--files out.tsv] [--streams out.tsv] files...
 '-' as a file name is standard input or output. compress and decompress name
@@ -596,8 +596,9 @@ fn info(a: &Args) {
     }
 }
 
-/// Census over many files: .mvdz (read from the metadata) or raw .mvd
-/// (scanned). One JSON object per line, or a TSV of the main counts.
+/// Census over many files (.mvdz decoded, .mvd and .mvd.gz read): a scan
+/// of each demo, informative and not part of the format. One JSON object
+/// per line, or a TSV of the main counts.
 fn census(a: &Args) {
     let mut files = Vec::new();
     for f in &a.files {
@@ -627,39 +628,31 @@ fn census(a: &Args) {
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
-        let m = if name.ends_with(".mvdz") {
-            let Ok(r) = std::fs::File::open(&p) else {
-                continue;
-            };
-            match api::read_metadata(std::io::BufReader::new(r)) {
-                Ok(fi) => fi.meta,
+        let demo = name.ends_with(".mvd") || name.ends_with(".mvd.gz");
+        if !demo && !name.ends_with(".mvdz") {
+            continue;
+        }
+        let Ok(mut b) = std::fs::read(&p) else {
+            continue;
+        };
+        if !demo {
+            match api::decompress(&b, 1) {
+                Ok(d) => b = d,
                 Err(e) => {
                     eprintln!("{name}: {e}");
                     continue;
                 }
             }
-        } else if name.ends_with(".mvd") || name.ends_with(".mvd.gz") {
-            let Ok(mut b) = std::fs::read(&p) else {
-                continue;
-            };
-            if mvdz::is_gzip(&b) {
-                match mvdz::gunzip(&b, Limits::default().memory) {
-                    Ok(d) => b = d,
-                    Err(e) => {
-                        eprintln!("{name}: {e}");
-                        continue;
-                    }
+        } else if mvdz::is_gzip(&b) {
+            match mvdz::gunzip(&b, Limits::default().memory) {
+                Ok(d) => b = d,
+                Err(e) => {
+                    eprintln!("{name}: {e}");
+                    continue;
                 }
             }
-            let s = mvdz::meta::scan(&b);
-            // the demoinfo the scan found (an .mvdz has it in its metadata)
-            let demoinfo = s.demoinfo.clone();
-            let mut m = mvdz::Metadata::from_scan(s, Vec::new());
-            m.demoinfo = demoinfo;
-            m
-        } else {
-            continue;
-        };
+        }
+        let m = mvdz::meta::scan(&b);
         let census: serde_json::Value =
             serde_json::from_str(&m.census).unwrap_or(serde_json::Value::Null);
         if a.tsv {

@@ -4,9 +4,9 @@
 (`.mvd`). An `.mvdz` file is about a fifth of the raw demo and a third of
 the demo's gzip, decodes back to the exact original bytes (checked by
 SHA-256), can be read sequentially from a pipe or seeked by demo time, and
-carries the demo's metadata (identity hash, server info, roster, a census
-of its contents, raw time stamps and pauses) so catalogues can read it without
-decoding.
+carries the demo's metadata (identity hash, server info, players and their
+userinfo changes, raw time stamps and pauses) as found in the demo, so
+catalogues can read it without decoding.
 
 It comes as a command-line tool, a Rust library, a C library (static or
 shared, for engines such as ezQuake and FTE) and builds for WebAssembly.
@@ -151,7 +151,7 @@ mvdz compress   [--fast] [-s size] [-j threads] [--ext key=value]... [--allow-no
 mvdz decompress [-j threads] [--max-memory size] [--trusted] [--gzip | --no-gzip]
                 [-f] [--rm] files... | in.mvdz out | -o out in.mvdz
 mvdz info       file.mvdz...                 metadata and index as JSON
-mvdz census     [--tsv] files-or-dirs...     census of .mvdz / .mvd / .mvd.gz files
+mvdz census     [--tsv] files-or-dirs...     scan .mvdz / .mvd / .mvd.gz demos (informative)
 mvdz bench      [--levels normal,fast] [-s size] [-r reps] [-j threads] [--trusted] files...
 ```
 

@@ -97,8 +97,6 @@ func v1meta_(body []byte) *v1meta {
 			m.duration = f.uv()
 			m.frames = f.uv()
 			m.tmng = true
-		case 9:
-			v1checkUTF8(v)
 		case 11:
 			f.uv()
 			f.uv()

@@ -15,6 +15,12 @@
   strings (`truncated`). `Metadata::roster` the field is now
   `Metadata::players`. Files from earlier drafts still decode, but their
   tag 7 roster is ignored (an empty roster).
+* The census is no longer part of the file (META tag 9 is unassigned):
+  the header holds only values taken from the demo as they are, not an
+  analysis of it. Files are about 2 KB smaller. `mvdz census` still
+  reports it, from a scan of the demo (an .mvdz is decoded first, so it
+  is slower on .mvdz files); the census JSON is informative and not part
+  of the format. `Metadata::census` and `census` in `mvdz info` are gone.
 * The time sources are raw values only: FORMAT.md §3.1 no longer defines
   how to parse `epoch` or `matchdate`, a ranking of the sources, or a
   wall-clock base. It describes what each source means and how pauses

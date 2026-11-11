@@ -32,7 +32,8 @@ fn metadata_and_census() {
         (3, 9, b"\\name\\bob\\team\\blue\\*client\\fte".to_vec())
     );
     assert!(m.demoinfo.is_empty() && m.demoinfo_json().is_none());
-    let cs: serde_json::Value = serde_json::from_str(&m.census).unwrap();
+    // the census is a scan of the demo (`mvdz census`), not in the file
+    let cs: serde_json::Value = serde_json::from_str(&mvdz::meta::scan(&demo).census).unwrap();
     let cmds = &cs["stufftext"]["commands"];
     assert_eq!(
         cmds["topcolor"]["count"], 50,
@@ -52,7 +53,8 @@ fn metadata_and_census() {
         serde_json::json!(["ezQuake 7", "fte"])
     );
     assert_eq!(json["map"], "maps/dm4.bsp");
-    assert_eq!(json["census"]["frames"], cs["frames"]);
+    assert!(json.get("census").is_none());
+    assert_eq!(json["frames"], cs["frames"]);
     assert_eq!(json["size"], demo.len());
 }
 
@@ -75,7 +77,6 @@ fn demoinfo_multi_block_round_trip() {
             assert_eq!(readers_agree(&c, "demoinfo").unwrap(), demo);
             let m = mvdz::read_metadata(Cursor::new(&c)).unwrap().meta;
             assert_eq!(m.demoinfo_json().unwrap(), b"{\"a\":3,\"b\":4}");
-            assert!(m.census.contains("\"0x0003\":[6,"));
             // the demo stream references the metadata copy, which carries a
             // CRC: damaging it makes every reader refuse the file
             let meta_off = u64::from_le_bytes(c[8..16].try_into().unwrap()) as usize;
@@ -93,12 +94,8 @@ fn truncated_demo_round_trips_and_is_flagged() {
     for seg in [0, 200] {
         let c = mvdz::compress(&demo, &cfg(Level::Normal, seg)).unwrap();
         assert_eq!(readers_agree(&c, "truncated").unwrap(), demo);
-        let m = mvdz::read_metadata(Cursor::new(&c)).unwrap().meta;
-        assert!(
-            m.census.contains("\"truncated\":true,\"tail_bytes\":4"),
-            "{}",
-            m.census
-        );
+        let cs = mvdz::meta::scan(&demo).census;
+        assert!(cs.contains("\"truncated\":true,\"tail_bytes\":4"), "{cs}");
     }
     if let Some(d) = duel() {
         // one byte holds no frame: refused as a non-demo
@@ -128,26 +125,6 @@ fn census_scan_is_linear() {
         t.elapsed()
     );
     assert!(sc.census.contains("\"messages\":20000"));
-}
-
-/// A census that is not a JSON object cannot inject keys into the JSON
-/// rendering (robustness review 10).
-#[test]
-fn census_json_cannot_inject() {
-    let demo = synthetic(&[], false);
-    let c = mvdz::compress(&demo, &c0()).unwrap();
-    let fi = mvdz::read_metadata(Cursor::new(&c)).unwrap();
-    for census in ["{}, \"sha256\": \"00\", \"x\": {", "}", "[1]", "{\"ok\":1}"] {
-        let mut fi = fi.clone();
-        fi.meta.census = census.into();
-        let j: serde_json::Value = serde_json::from_str(&fi.to_json()).unwrap();
-        assert_eq!(j["sha256"], mvdz::api::hex(&fi.meta.sha256));
-        if census.starts_with("{\"ok") {
-            assert_eq!(j["census"]["ok"], 1);
-        } else {
-            assert!(j["census"].is_null());
-        }
-    }
 }
 
 // ---------------------------------------------------------------- forward compatibility
@@ -311,7 +288,8 @@ fn matchkey_raw_joined() {
         let m = mvdz::read_metadata(Cursor::new(&c)).unwrap().meta;
         assert_eq!(m.clock.matchkey, Some((40, b"4-196677-9630".to_vec())));
         assert_eq!(m.clock.matchdate, None);
-        assert!(m.census.contains("\"matchkey\":[40,\"4-196677-9630\"]"));
+        let cs = mvdz::meta::scan(&demo).census;
+        assert!(cs.contains("\"matchkey\":[40,\"4-196677-9630\"]"));
     }
     // a line the demo ends inside is kept as far as it goes
     let mut d = Demo(Vec::new());

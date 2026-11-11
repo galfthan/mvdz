@@ -226,7 +226,6 @@ struct JInfo {
     players: serde_json::Value,
     demoinfo: Option<String>,
     ext: serde_json::Map<String, serde_json::Value>,
-    census: Option<Box<serde_json::value::RawValue>>,
     clock: serde_json::Value,
     segments: Vec<JSeg>,
 }
@@ -258,12 +257,9 @@ impl FileInfo {
     /// `max` bytes: escaping can make it up to six times the metadata
     /// (FORMAT.md §3.2). Byte strings (map, serverinfo, userinfo, demoinfo,
     /// extension values) are Latin-1: each byte becomes the code point of
-    /// the same value. The census is included only if it is a JSON object.
+    /// the same value.
     pub fn to_json_with(&self, max: usize) -> Result<String> {
         let m = &self.meta;
-        let census = serde_json::from_str::<Box<serde_json::value::RawValue>>(&m.census)
-            .ok()
-            .filter(|r| r.get().trim_start().starts_with('{'));
         let j = JInfo {
             version: VERSION,
             streamed: self.flags & F_STREAMED != 0,
@@ -290,7 +286,6 @@ impl FileInfo {
                 .iter()
                 .map(|(k, v)| (k.clone(), serde_json::Value::String(latin1(v))))
                 .collect(),
-            census,
             players: {
                 use crate::meta::InfoChange;
                 let p = &m.players;
