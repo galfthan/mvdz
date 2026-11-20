@@ -4,7 +4,7 @@
 //! size by the bytes actually present: a decoder's memory and work are
 //! linear in its input. The budget is the caller's cap on top of that: one
 //! memory limit for everything a decode holds at once (output, segment
-//! scratch, models, metadata, attachments) and one work limit (model
+//! scratch, models, metadata) and one work limit (model
 //! decisions plus output bytes, per input byte). It is checked before an
 //! allocation is made, and running out is an error, never an abort.
 
@@ -53,7 +53,7 @@ pub struct ReadOptions {
     /// rely on the CRC-32C checks alone (every segment's, and the whole
     /// demo's). For caches that verified the SHA-256 once, at ingest. Off
     /// by default: a file from elsewhere may carry a forged identity
-    /// (FORMAT.md §14).
+    /// (FORMAT.md §13).
     pub trusted: bool,
 }
 

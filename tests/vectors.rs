@@ -12,7 +12,7 @@ mod common;
 use common::*;
 use mvdz::format::*;
 use mvdz::util::put_uv;
-use mvdz::{Attachment, Config, Level};
+use mvdz::{Config, Level};
 use sha2::{Digest, Sha256};
 
 fn dir() -> std::path::PathBuf {
@@ -540,21 +540,6 @@ fn tables(add: &mut impl FnMut(&str, Vec<u8>, &str)) {
         build(0, true, &s, true),
         "an empty demo (no segment) with a TABLES section after the INDEX",
     );
-    let att = mvdz::Attachment {
-        name: "notes.txt".into(),
-        mime: "text/plain".into(),
-        kv: vec![],
-        data: b"note".to_vec(),
-    };
-    let mut s = sections(&mvdz::update_attachments_bytes(&tc, &[], &[att]).unwrap());
-    let t = s.remove(1);
-    let ia = s.iter().position(|x| x.0 == K_ATTACH).unwrap();
-    s.insert(ia + 1, t);
-    add(
-        "tables-in-attachments",
-        build(0, true, &s, true),
-        "the TABLES section moved into the attachment part, after an ATTACH",
-    );
     let mut s = st.clone();
     s.insert(2, st[1].clone());
     add(
@@ -812,38 +797,9 @@ fn all_vectors() -> Option<Vec<Vector>> {
     );
     let mut rng = Rng(0x1234);
     let random: Vec<u8> = (0..3000).map(|_| rng.next() as u8).collect();
-    let vtt = b"WEBVTT\n\n00:00.000 --> 00:02.000\n<v alice>go quad\n".repeat(40);
-    let atts = [
-        Attachment {
-            name: "transcript/alice.vtt".into(),
-            mime: "text/vtt".into(),
-            kv: vec![
-                ("x-kind".into(), "transcript".into()),
-                ("example.offset_ms".into(), "2500".into()),
-            ],
-            data: vtt,
-        },
-        Attachment {
-            name: "voice/alice.opus".into(),
-            mime: "audio/ogg; codecs=opus".into(),
-            kv: vec![
-                ("x-kind".into(), "voice".into()),
-                ("example.who".into(), "alice".into()),
-            ],
-            data: random.clone(),
-        },
-    ];
-    let att = mvdz::update_attachments_bytes(&one(&duel, c(Level::Normal, 0)), &[], &atts).unwrap();
-    add(
-        "duel.attach.mvdz",
-        att.clone(),
-        &duel,
-        "duel.normal + a zstd attachment (text/vtt) and a stored one (random bytes)",
-    );
     // forward compatibility: unknown flag bits and reserved bytes, an
-    // unknown section, an unknown META tag, an unknown attachment key and
-    // codec
-    let mut secs = sections(&att);
+    // unknown section, an unknown META tag
+    let mut secs = sections(&one(&duel, c(Level::Normal, 0)));
     let m = Metadata::decode(&secs[0].1, &mvdz::budget::Budget::unlimited()).unwrap();
     let enc = m.encode().unwrap();
     let mut r = mvdz::util::Rd::new(&enc);
@@ -866,13 +822,10 @@ fn all_vectors() -> Option<Vec<Vector>> {
     mb.extend_from_slice(&mvdz::util::crc32(&p).to_le_bytes());
     mb.extend_from_slice(&p);
     secs[0].1 = mb;
-    let ia = secs.iter().position(|s| s.0 == K_ADIR).unwrap();
-    let mut d = parse_adir(&secs[ia].1).unwrap();
-    d[1].kv.push(("x-future".into(), "1".into()));
-    d[1].codec = 9;
-    secs[ia].1 = adir_body(&d);
     let iix = secs.iter().position(|s| s.0 == K_INDEX).unwrap();
-    secs.insert(iix, (0x40, b"future section".to_vec()));
+    for kind in [0x40, 0x04, 0x05] {
+        secs.insert(iix, (kind, b"future section".to_vec()));
+    }
     let mut fwd = build(0x80, true, &secs, true);
     fwd[6] = 0x12;
     fwd[7] = 0x34;
@@ -880,7 +833,7 @@ fn all_vectors() -> Option<Vec<Vector>> {
         "duel.forward.mvdz",
         fwd,
         &duel,
-        "duel.attach + prefix flag 0x80 and reserved bytes, an unknown section 0x40, an unknown META tag, an unknown attachment key and codec",
+        "duel.normal + prefix flag 0x80 and reserved bytes, unknown sections 0x40, 0x04 and 0x05, an unknown META tag",
     );
     add(
         "float-mvd1.normal.mvdz",

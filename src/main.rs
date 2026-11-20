@@ -26,14 +26,8 @@ fn usage() -> ! {
   mvdz decompress [-j threads] [--max-memory size] [--trusted] [--gzip | --no-gzip]
                   [-f] [--rm] files... | in.mvdz out | -o out in.mvdz
                   game.mvdz -> game.mvd (game.mvd.gz with --gzip) beside it
-  mvdz info       file.mvdz...                     metadata, index, attachments as JSON
+  mvdz info       file.mvdz...                     metadata and index as JSON
   mvdz census     [--tsv] files-or-dirs...         census of .mvdz / .mvd / .mvd.gz files
-  mvdz attach add file.mvdz name path [--mime type] [--meta key=value]...
-  mvdz attach ls  file.mvdz [prefix]
-  mvdz attach extract file.mvdz name out
-  mvdz attach rm  file.mvdz name...
-  mvdz attach export in.mvdz out.mvdz [--keep name]... [--keep-prefix p]... [--drop name]... [--drop-prefix p]...
-                  copy keeping the attachments that match a keep (all if none given) and no drop
   mvdz bench      [--levels normal,fast] [-s size] [-r reps] [-j threads] [--no-verify]
                   [--skip-compress] [--trusted] [--files out.tsv] [--streams out.tsv] files...
 '-' as a file name is standard input or output. compress and decompress name
@@ -50,8 +44,7 @@ and decode, larger (default: normal).
 -s cuts the demo into independently decodable segments (default: 256K;
 0: one segment for the whole demo, which cannot seek).
 --trusted skips the SHA-256 identity check (CRC-32C checks only): only for
-files whose SHA-256 was verified before. attach add --mime defaults to
-application/octet-stream; --meta keys need a prefix, x- or vendor. (FORMAT.md 10.1)."
+files whose SHA-256 was verified before."
     );
     std::process::exit(2)
 }
@@ -67,8 +60,6 @@ struct Args {
     files: Vec<String>,
     no_verify: bool,
     ext: Vec<(String, Vec<u8>)>,
-    kv: Vec<(String, String)>,
-    mime: String,
     tsv: bool,
     skip_compress: bool,
     trusted: bool,
@@ -77,10 +68,6 @@ struct Args {
     output: Option<String>,
     overwrite: bool,
     rm: bool,
-    keep: Vec<String>,
-    keep_prefix: Vec<String>,
-    drop: Vec<String>,
-    drop_prefix: Vec<String>,
 }
 
 fn size(s: &str) -> u64 {
@@ -117,8 +104,6 @@ fn parse(args: &[String]) -> Args {
         files: Vec::new(),
         no_verify: false,
         ext: Vec::new(),
-        kv: Vec::new(),
-        mime: "application/octet-stream".into(),
         tsv: false,
         skip_compress: false,
         trusted: false,
@@ -127,10 +112,6 @@ fn parse(args: &[String]) -> Args {
         output: None,
         overwrite: false,
         rm: false,
-        keep: Vec::new(),
-        keep_prefix: Vec::new(),
-        drop: Vec::new(),
-        drop_prefix: Vec::new(),
     };
     let mut i = 0;
     while i < args.len() {
@@ -167,20 +148,10 @@ fn parse(args: &[String]) -> Args {
             "-o" | "--output" => a.output = Some(val()),
             "-f" | "--force" => a.overwrite = true,
             "--rm" => a.rm = true,
-            "--keep" => a.keep.push(val()),
-            "--keep-prefix" => a.keep_prefix.push(val()),
-            "--drop" => a.drop.push(val()),
-            "--drop-prefix" => a.drop_prefix.push(val()),
-            "--mime" => a.mime = val(),
-            "--ext" | "--meta" => {
-                let flag = s.clone();
+            "--ext" => {
                 let v = val();
                 let (k, x) = v.split_once('=').unwrap_or_else(|| usage());
-                if flag == "--ext" {
-                    a.ext.push((k.into(), x.as_bytes().to_vec()));
-                } else {
-                    a.kv.push((k.into(), x.into()));
-                }
+                a.ext.push((k.into(), x.as_bytes().to_vec()));
             }
             "-" => a.files.push(s.clone()),
             _ if s.starts_with('-') => usage(),
@@ -261,10 +232,6 @@ fn try_write_output(p: &str, data: &[u8], gzip: bool) -> Result<(), String> {
         }
         _ => api::write_file_atomic_with(path, |f| put(f, data, gzip)).map_err(|e| e.to_string()),
     }
-}
-
-fn write_output(p: &str, data: &[u8], gzip: bool) {
-    try_write_output(p, data, gzip).unwrap_or_else(|e| die(format!("{p}: {e}")))
 }
 
 /// Whether `name` ends with the ASCII suffix `suf`, ignoring case.
@@ -444,7 +411,6 @@ fn main() {
         "bench" => bench(&a),
         "info" => info(&a),
         "census" => census(&a),
-        "attach" => attach(&argv),
         _ => usage(),
     }
 }
@@ -728,82 +694,5 @@ fn census(a: &Args) {
             let j = serde_json::json!({"file": name, "sha256": api::hex(&m.sha256), "demoinfo": !m.demoinfo.is_empty(), "census": census});
             out!("{j}");
         }
-    }
-}
-
-fn attach(argv: &[String]) {
-    let a = parse(&argv[2.min(argv.len())..]);
-    let sub = argv.get(1).map(|s| s.as_str()).unwrap_or_else(|| usage());
-    let file = a.files.first().unwrap_or_else(|| usage());
-    let path = std::path::Path::new(file);
-    match sub {
-        "add" => {
-            if a.files.len() != 3 {
-                usage();
-            }
-            let data = std::fs::read(&a.files[2]).unwrap_or_else(|e| die(e));
-            let att = api::Attachment {
-                name: a.files[1].clone(),
-                mime: a.mime.clone(),
-                kv: a.kv.clone(),
-                data,
-            };
-            api::update_attachments(path, &[], &[att]).unwrap_or_else(|e| die(e));
-        }
-        "ls" => {
-            let r = std::fs::File::open(path).unwrap_or_else(|e| die(e));
-            let prefix = a.files.get(1).map(|s| s.as_str()).unwrap_or("");
-            // names and values come from the file: printed escaped
-            let esc = |s: &str| s.escape_debug().to_string();
-            out!("name\tmime\tsize\tstored\tkeys");
-            for e in
-                api::list_attachments(std::io::BufReader::new(r), prefix).unwrap_or_else(|e| die(e))
-            {
-                let kv: Vec<String> =
-                    e.kv.iter()
-                        .map(|(k, v)| format!("{}={}", esc(k), esc(v)))
-                        .collect();
-                out!(
-                    "{}\t{}\t{}\t{}\t{}",
-                    esc(&e.name),
-                    esc(&e.mime),
-                    e.size,
-                    e.stored,
-                    kv.join(",")
-                );
-            }
-        }
-        "extract" => {
-            if a.files.len() != 3 {
-                usage();
-            }
-            let r = std::fs::File::open(path).unwrap_or_else(|e| die(e));
-            let d = api::read_attachment(std::io::BufReader::new(r), &a.files[1])
-                .unwrap_or_else(|e| die(e));
-            write_output(&a.files[2], &d, false);
-        }
-        "export" => {
-            if a.files.len() != 2 {
-                usage();
-            }
-            let r = std::fs::File::open(path).unwrap_or_else(|e| die(e));
-            let sel = mvdz::Selection {
-                keep: a.keep.clone(),
-                keep_prefix: a.keep_prefix.clone(),
-                drop: a.drop.clone(),
-                drop_prefix: a.drop_prefix.clone(),
-            };
-            let mut out = Vec::new();
-            let h =
-                api::export_attachments(std::io::BufReader::new(r), &mut out, |e| sel.matches(e))
-                    .unwrap_or_else(|e| die(e));
-            write_output(&a.files[1], &out, false);
-            eprintln!("bundle_sha256 {}", api::hex(&h));
-        }
-        "rm" => {
-            let names: Vec<&str> = a.files[1..].iter().map(|s| s.as_str()).collect();
-            api::update_attachments(path, &names, &[]).unwrap_or_else(|e| die(e));
-        }
-        _ => usage(),
     }
 }

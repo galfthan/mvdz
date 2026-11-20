@@ -163,50 +163,6 @@ func v1meta_(body []byte) *v1meta {
 	return m
 }
 
-type v1adir struct {
-	off, stored uint64
-}
-
-func v1parseADIR(b []byte) []v1adir {
-	r := &rd{b: b}
-	n := r.uv()
-	if n > uint64(len(b)/46) {
-		fail("adir count")
-	}
-	names := map[string]bool{}
-	var out []v1adir
-	for i := uint64(0); i < n; i++ {
-		name := r.take(r.uv())
-		v1checkUTF8(name)
-		if len(name) == 0 || names[string(name)] {
-			fail("adir name")
-		}
-		names[string(name)] = true
-		v1checkUTF8(r.take(r.uv()))
-		r.u8()
-		r.uv()
-		stored := r.uv()
-		r.take(32)
-		off := r.u64()
-		nk := r.uv()
-		keys := map[string]bool{}
-		for k := uint64(0); k < nk; k++ {
-			key := r.take(r.uv())
-			v1checkUTF8(key)
-			if keys[string(key)] {
-				fail("adir key")
-			}
-			keys[string(key)] = true
-			v1checkUTF8(r.take(r.uv()))
-		}
-		out = append(out, v1adir{off, stored})
-	}
-	if r.left() != 0 {
-		fail("adir trailing")
-	}
-	return out
-}
-
 func decodeV1(file []byte) (out []byte, err error) {
 	defer catch(&err)
 	if len(file) < 5 || string(file[:4]) != "MVDZ" || file[4] != 1 {
@@ -218,8 +174,8 @@ func decodeV1(file []byte) (out []byte, err error) {
 	pr := &rd{b: file, p: 8}
 	prefMeta := pr.u64()
 	var meta *v1meta
-	var metaOff, indexOff, adirOff, attachStart uint64
-	var haveMeta, haveIndex, haveAdir, inAttach, haveTables bool
+	var metaOff, indexOff uint64
+	var haveMeta, haveIndex, haveTables bool
 	// TABLES (§2.6): the file's shared rANS models by stream id
 	tables := map[uint64]*ransModel{}
 	var ix struct {
@@ -228,11 +184,8 @@ func decodeV1(file []byte) (out []byte, err error) {
 		segs      [][3]uint64
 	}
 	var segs []v1seg
-	var atts []v1sec
-	var adir []v1adir
 	var raw, dnext uint64
 	var trailer *rd
-	var trailerOff uint64
 	off := uint64(16)
 	for off < uint64(len(file)) {
 		if trailer != nil {
@@ -250,7 +203,7 @@ func decodeV1(file []byte) (out []byte, err error) {
 		body := file[off+9 : off+9+l]
 		switch kind {
 		case 0x01:
-			if haveMeta || inAttach {
+			if haveMeta {
 				fail("meta order")
 			}
 			if l > 1<<24+64 {
@@ -259,7 +212,7 @@ func decodeV1(file []byte) (out []byte, err error) {
 			meta = v1meta_(body)
 			haveMeta, metaOff = true, off
 		case 0x03:
-			if haveIndex || inAttach {
+			if haveIndex {
 				fail("index order")
 			}
 			if l > 1<<24 {
@@ -284,7 +237,7 @@ func decodeV1(file []byte) (out []byte, err error) {
 			}
 			haveIndex, indexOff = true, off
 		case 0x82:
-			if haveIndex || inAttach {
+			if haveIndex {
 				fail("segment order")
 			}
 			x := &rd{b: body}
@@ -317,7 +270,7 @@ func decodeV1(file []byte) (out []byte, err error) {
 			raw += s.rawLen
 			segs = append(segs, s)
 		case 0x86:
-			if haveTables || inAttach || haveIndex || len(segs) > 0 {
+			if haveTables || haveIndex || len(segs) > 0 {
 				fail("tables order")
 			}
 			if l > 1<<24 {
@@ -345,32 +298,11 @@ func decodeV1(file []byte) (out []byte, err error) {
 				fail("tables trailing")
 			}
 			haveTables = true
-		case 0x04:
-			if haveAdir {
-				fail("attach after adir")
-			}
-			if !inAttach {
-				inAttach, attachStart = true, off
-			}
-			atts = append(atts, v1sec{kind, off, body})
-		case 0x05:
-			if haveAdir {
-				fail("dup adir")
-			}
-			if l > 1<<24 {
-				fail("adir len")
-			}
-			if !inAttach {
-				inAttach, attachStart = true, off
-			}
-			adir = v1parseADIR(body)
-			haveAdir, adirOff = true, off
 		case 0x7F:
-			if l != 40 || off+49 != uint64(len(file)) || string(body[32:]) != "MVDZTRL1" {
+			if l != 24 || off+33 != uint64(len(file)) || string(body[16:]) != "MVDZTRL1" {
 				fail("trailer")
 			}
 			trailer = &rd{b: body}
-			trailerOff = off
 		default:
 			if kind&0x80 != 0 {
 				fail("unknown critical section")
@@ -381,18 +313,9 @@ func decodeV1(file []byte) (out []byte, err error) {
 	if trailer == nil || !haveMeta || !haveIndex {
 		fail("incomplete")
 	}
-	tIdx, tMeta, tAdir, tEnd := trailer.u64(), trailer.u64(), trailer.u64(), trailer.u64()
+	tIdx, tMeta := trailer.u64(), trailer.u64()
 	if tMeta != metaOff || (prefMeta != 0 && prefMeta != metaOff) || tIdx != indexOff {
 		fail("trailer offsets")
-	}
-	if (haveAdir && tAdir != adirOff) || (!haveAdir && tAdir != 0) {
-		fail("adir offset")
-	}
-	if !inAttach {
-		attachStart = trailerOff
-	}
-	if tEnd != attachStart {
-		fail("body_end")
 	}
 	if len(ix.segs) != len(segs) || ix.size != raw || meta.size != ix.size || dnext != uint64(len(meta.demoinfo)) {
 		fail("index/segments")
@@ -400,14 +323,6 @@ func decodeV1(file []byte) (out []byte, err error) {
 	for i, e := range ix.segs {
 		if e[0] != segs[i].sec.off || e[1] != segs[i].rawLen || e[2] != segs[i].tStart {
 			fail("index entry")
-		}
-	}
-	if !haveAdir && len(atts) > 0 || haveAdir && len(adir) != len(atts) {
-		fail("adir")
-	}
-	for i, a := range adir {
-		if a.off != atts[i].off || a.stored != uint64(len(atts[i].body)) {
-			fail("adir entry")
 		}
 	}
 	// content

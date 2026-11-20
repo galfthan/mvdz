@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+* Attachments are removed from the format, the library, the C API (the
+  `mvdz_attachment*` and `mvdz_bundle_hash*` functions, `MVDZ_E_NOTFOUND`)
+  and the CLI (`mvdz attach`), along with the bundle hash.
+* The trailer no longer holds `adir_off` and `body_end`: it is 33 bytes,
+  and earlier files do not read. Section kinds 0x04 and 0x05 are unassigned.
 * The default segment size is now 256 KiB (`Config::default`, the CLI, and
   0 for the streaming writer, which was 1 MiB). `-s 0` keeps the whole demo
   in one segment. With the 65536-segment limit, the default covers demos

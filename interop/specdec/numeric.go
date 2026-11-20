@@ -298,7 +298,7 @@ func numCtx(L int, f [6]uint8) uint32 {
 	return cl(f[0], 63) | uint32(f[1])<<6
 }
 
-// Wave order (FORMAT.md §7.7, §13.1): everything in record order.
+// Wave order (FORMAT.md §7.7, §12 item 1): everything in record order.
 func numericV2(out []byte, w *Walker, val valFn) {
 	for a := 0; a < 3; a++ {
 		var tms [256]tm
