@@ -72,40 +72,42 @@ allocator would cost them 15-40 %.
 ## Quickstart
 
 ```
-mvdz compress game.mvd.gz                    # -> game.mvdz (normal level, one segment)
+mvdz compress game.mvd.gz                    # -> game.mvdz (normal level, 256 KiB segments)
 mvdz compress *.mvd.gz                       # every file, several at once
-mvdz compress --fast -s 1M game.mvd          # faster both ways, seekable segments
+mvdz compress -s 0 game.mvd                  # one segment: smallest, cannot seek
+mvdz compress --fast -s 1M game.mvd          # faster both ways, larger segments
 mvdz decompress game.mvdz                    # -> game.mvd (--gzip: game.mvd.gz)
 mvdz info game.mvdz | jq .sha256             # metadata, without decoding
 ```
 
-### Segments: one, or `-s 1M`
+### Segments: 256 KiB by default, or `-s 0`
 
 A file holds the demo in one or more independently decodable segments.
 
-* **One segment** (the default of `mvdz compress` and of the one-shot
-  library and C calls): the smallest file. It cannot seek, and a reader
-  gets no demo bytes until the whole demo has been decoded. Right for
-  archives and downloads that are decompressed whole.
-* **`-s 1M`** (about 1 MiB of raw demo per segment): about 1 % larger at
-  the normal level, 2 % at the fast level ([BENCHMARKS.md](BENCHMARKS.md));
-  at the normal level the segments share one set of rANS models, stored
-  once in the file. A reader can seek by demo time to the start of any
-  segment, delivers the first bytes after one segment has decoded, and
-  can decode segments in parallel. Use it for files that will be played,
-  streamed or seeked into.
+* **256 KiB segments** (the default of `mvdz compress`, `Config::default()`
+  and the streaming writer): about 3 to 5 % larger than one segment at the
+  normal level and about 5 % at the fast level, whose one-thread decoding
+  also drops from about 48 to 36 MB/s ([BENCHMARKS.md](BENCHMARKS.md)); at the normal level the
+  segments of a one-shot file share one set of rANS models, stored once in
+  the file. A reader can seek by demo time to the start of any segment,
+  delivers the first bytes after one segment has decoded, and whole-buffer
+  decoding runs segments in parallel.
+* **`-s 0`, one segment**: the smallest file. It cannot seek, a reader gets
+  no demo bytes until the whole demo has been decoded, and it decodes on
+  one thread. Right for archives that are decompressed whole. In the C
+  call `mvdz_compress` a segment size of 0 means this.
 
 The streaming writer (Rust `Writer`, C `mvdz_writer_*`), which records a
 demo as it grows, always cuts segments, because it writes each one as it
-fills: its default is 1 MiB. So the two defaults differ on purpose, each
-the best choice for its use: one-shot compression of a finished demo
-optimises size, a recording must cut. Pass a segment size explicitly to
-either to get the other behaviour. A recorded file keeps a model in every
-segment (it cannot know the whole demo's models before its first
-segment), so at the normal level it is about 3 to 5 % larger than
-`mvdz compress -s 1M` of the finished demo.
+fills; for it, 0 means the default. A recorded file keeps a model in every
+segment (it cannot know the whole demo's models before its first segment),
+so at the normal level it is about 7 to 10 % larger than `mvdz compress`
+of the finished demo.
 
 ## Ratios and speeds
+
+These figures are for one segment per demo (`-s 0`); the section above gives
+the cost of the default segments.
 
 Sizes: on a 72 GB archive of gzip-compressed demos (about 112 GB raw),
 measured on an independent stratified sample of 585 demos, with 95 %
@@ -170,10 +172,11 @@ go on, and the exit status is 1 if any failed. Two names where the second
 is an output (for `compress` a `*.mvdz` or `-`, for `decompress` anything
 but `*.mvdz`) are an input and its output, and `-o` names the output of a
 single input. `-` is standard input or output (`mvdz decompress game.mvdz
-- | ...`). Sizes take K, M, G suffixes (binary). `-s 1M` cuts the demo into
-independently decodable segments: seek points and parallel decoding, at a
-small cost in size; the default is one segment (a file holds at most 65536
-segments). Compression decodes its own output and compares before writing
+- | ...`). Sizes take K, M, G suffixes (binary). `-s` sets the size of the
+independently decodable segments, which give seek points and parallel
+decoding at a small cost in size. The default is 256 KiB, and `-s 0` keeps
+the whole demo in one segment (a file holds at most 65536 segments, so the
+default covers demos up to about 16 GiB). Compression decodes its own output and compares before writing
 anything. `--trusted` skips the SHA-256 identity check (see above); use it
 only for files whose identity you verified before. `attach add` stores the
 file as given; `--mime` defaults to `application/octet-stream`; `--meta`
@@ -256,10 +259,10 @@ let demo3 = mvdz::decompress_with(&packed, 1, &Limits { memory: 256 << 20, ..Def
 let demo4 = mvdz::decompress_with(&packed, 1, &ReadOptions { trusted: true, ..Default::default() })?;
 
 // sequential decoding from any io::Read; random access from io::Read + io::Seek
-let mut r = mvdz::Reader::open(std::fs::File::open("game.mvdz")?, 2, &ReadOptions::default())?;
+let mut r = mvdz::Reader::open(std::fs::File::open("game.mvdz")?, &ReadOptions::default())?;
 r.seek_time(60_000)?;                     // resume at the segment holding demo time 60 s
 std::io::copy(&mut r, &mut out)?;
-mvdz::decompress_stream(std::io::stdin(), std::io::stdout(), 1, &ReadOptions::default())?;
+mvdz::decompress_stream(std::io::stdin(), std::io::stdout(), &ReadOptions::default())?;
 
 // streaming compression of a demo that is still being recorded
 let mut w = mvdz::Writer::new(file, &Config { segment: 1 << 20, ..Default::default() })?;
@@ -305,15 +308,15 @@ link-arg=-Wl,-soname,libmvdz.so.1"`).
 
 /* decode through the engine's VFS callbacks, seek by time */
 int err;
-mvdz_reader *r = mvdz_open_callbacks(vfs_read, vfs_seek, file, 2, 0, 0, &err);
+mvdz_reader *r = mvdz_open_callbacks(vfs_read, vfs_seek, file, 0, 0, &err);
 if (!r) { printf("%s\n", mvdz_strerror(err)); return; }
 mvdz_seek_time(r, 60000, NULL, NULL);
 long long n;
 while ((n = mvdz_read(r, buf, sizeof buf)) > 0) feed_demo(buf, n);
 mvdz_close(r);
 
-/* record straight to .mvdz; segment 0 = 1 MiB for the writer */
-mvdz_writer *w = mvdz_writer_open(vfs_write, out, MVDZ_LEVEL_NORMAL, 0, 1, &err);
+/* record straight to .mvdz; segment 0 = 256 KiB for the writer */
+mvdz_writer *w = mvdz_writer_open(vfs_write, out, MVDZ_LEVEL_NORMAL, 0, &err);
 mvdz_writer_set_ext(w, "source", "myserver", 8);  /* optional metadata */
 mvdz_writer_write(w, data, len);          /* as the demo is recorded */
 mvdz_writer_finish(w);                     /* or mvdz_writer_abort(w) */

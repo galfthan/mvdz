@@ -5,7 +5,7 @@
 //! streams and writes them to the output. Numeric fields (origins, angles,
 //! sound/TE coordinates, long stats) are not touched: the walker only
 //! reserves their bytes and records where they are ([`Recs`]); the numeric
-//! groups (`numeric.rs`) fill them in afterwards, in parallel. The structure
+//! groups (`numeric.rs`) fill them in afterwards. The structure
 //! of a demo never depends on a numeric value, so the walk and the numeric
 //! groups are independent.
 //!
@@ -109,144 +109,39 @@ pub struct StlRec {
     pub key: u16,
 }
 
-/// An append-only record buffer with one writer (the walker) and any
-/// number of concurrent readers (the numeric groups) that see a published
-/// prefix. A fixed-capacity buffer never moves: the writer writes through a
-/// raw pointer taken once, and no reference to the vector exists while
-/// readers follow the walker. Growable buffers (encode side, never shared
-/// between threads) may reallocate.
+/// An append-only record list. A fixed list (decode side) is sized from the
+/// stream table and refuses records beyond that; a growable one (encode
+/// side) takes any number.
 pub struct RecBuf<T> {
-    /// owns the allocation (fixed: its length stays 0, it is only freed)
-    mem: std::cell::UnsafeCell<Vec<T>>,
-    /// start of the records (fixed: set once at construction)
-    base: std::cell::UnsafeCell<*mut T>,
-    /// records written (writer only)
-    wlen: std::cell::UnsafeCell<usize>,
+    v: Vec<T>,
     cap: usize,
-    len: std::sync::atomic::AtomicUsize,
-    done: std::sync::atomic::AtomicBool,
-    fixed: bool,
 }
 
-// SAFETY: one writer appends beyond the published length through `base`;
-// readers only touch the published prefix (Release/Acquire on `len`).
-// `base` of a fixed buffer is never written after construction; growable
-// buffers are not shared between threads.
-unsafe impl<T: Send> Sync for RecBuf<T> {}
-unsafe impl<T: Send> Send for RecBuf<T> {}
-
-impl<T: Copy> RecBuf<T> {
-    /// A buffer that never reallocates; allocation failure is an error.
+impl<T> RecBuf<T> {
+    /// A list of at most `cap` records; allocation failure is an error.
     pub fn fixed(cap: usize) -> crate::error::Result<RecBuf<T>> {
-        let mut v: Vec<T> = crate::budget::with_capacity(cap)?;
-        let base = v.as_mut_ptr();
         Ok(RecBuf {
-            mem: std::cell::UnsafeCell::new(v),
-            base: std::cell::UnsafeCell::new(base),
-            wlen: std::cell::UnsafeCell::new(0),
+            v: crate::budget::with_capacity(cap)?,
             cap,
-            len: Default::default(),
-            done: Default::default(),
-            fixed: true,
         })
     }
     pub fn growable(cap: usize) -> RecBuf<T> {
-        let mut v: Vec<T> = Vec::with_capacity(cap);
-        let base = v.as_mut_ptr();
         RecBuf {
-            mem: std::cell::UnsafeCell::new(v),
-            base: std::cell::UnsafeCell::new(base),
-            wlen: std::cell::UnsafeCell::new(0),
-            cap,
-            len: Default::default(),
-            done: Default::default(),
-            fixed: false,
+            v: Vec::with_capacity(cap),
+            cap: usize::MAX,
         }
     }
-    /// Single-writer append; false if a fixed buffer is full.
+    /// Appends a record; false if a fixed list is full.
     #[inline(always)]
-    pub fn push(&self, v: T) -> bool {
-        use std::sync::atomic::Ordering;
-        // SAFETY: only the walker calls push (single writer). A fixed
-        // buffer writes slot n < cap of its allocation, which no reader
-        // sees before it is published; a growable buffer is not shared.
-        let n = unsafe {
-            let w = &mut *self.wlen.get();
-            if self.fixed {
-                if *w == self.cap {
-                    return false;
-                }
-                (*self.base.get()).add(*w).write(v);
-            } else {
-                let m = &mut *self.mem.get();
-                m.push(v);
-                *self.base.get() = m.as_mut_ptr();
-            }
-            *w += 1;
-            *w
-        };
-        // publish in batches: a store per record would bounce the cache
-        // line between the walker and the readers polling it
-        if n & 255 == 0 {
-            self.len.store(n, Ordering::Release);
+    pub fn push(&mut self, v: T) -> bool {
+        if self.v.len() == self.cap {
+            return false;
         }
+        self.v.push(v);
         true
     }
-    #[inline(always)]
-    pub fn published(&self) -> &[T] {
-        let n = self.len.load(std::sync::atomic::Ordering::Acquire);
-        // SAFETY: the first n records are initialised (published with
-        // Release after they were written) and never written again
-        unsafe { std::slice::from_raw_parts(*self.base.get(), n) }
-    }
-    pub fn finish(&self) {
-        // SAFETY: called by the writer after its last push
-        let n = unsafe { *self.wlen.get() };
-        self.len.store(n, std::sync::atomic::Ordering::Release);
-        self.done.store(true, std::sync::atomic::Ordering::Release);
-    }
-    /// Iterates all records, waiting for the writer where needed.
-    pub fn feed(&self) -> Feed<'_, T> {
-        Feed {
-            rb: self,
-            i: 0,
-            avail: self.published(),
-        }
-    }
-}
-
-pub struct Feed<'a, T> {
-    rb: &'a RecBuf<T>,
-    i: usize,
-    avail: &'a [T],
-}
-
-impl<'a, T: Copy> Iterator for Feed<'a, T> {
-    type Item = &'a T;
-    #[inline(always)]
-    fn next(&mut self) -> Option<&'a T> {
-        if self.i >= self.avail.len() {
-            let mut spins = 0u32;
-            loop {
-                let done = self.rb.done.load(std::sync::atomic::Ordering::Acquire);
-                self.avail = self.rb.published();
-                if self.i < self.avail.len() {
-                    break;
-                }
-                if done {
-                    return None;
-                }
-                spins += 1;
-                if spins < 64 {
-                    std::hint::spin_loop();
-                } else {
-                    std::thread::yield_now();
-                }
-            }
-        }
-        let r = &self.avail[self.i];
-        self.i += 1;
-        Some(r)
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.v.iter()
     }
 }
 
@@ -289,14 +184,6 @@ impl Recs {
             uc: RecBuf::fixed(uc)?,
         })
     }
-    pub fn finish(&self) {
-        self.pi.finish();
-        self.pe.finish();
-        self.snd.finish();
-        self.te.finish();
-        self.stl.finish();
-        self.uc.finish();
-    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -335,7 +222,7 @@ pub struct Walker<'a, const ENC: bool, IO: SymIO> {
     pub err: bool,
     pub io: IO,
     pub proto: Proto,
-    pub recs: &'a Recs,
+    pub recs: &'a mut Recs,
     pl: Box<[PlState; 256]>,
     ent: Box<[EntState; 2048]>,
     st: Box<[[u8; 256]; 32]>,
@@ -368,13 +255,13 @@ pub struct Walker<'a, const ENC: bool, IO: SymIO> {
 
 impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
     /// `dst`/`dst_len`: the output segment (decode; empty on encode). The
-    /// walker writes only structural bytes; numeric groups may write the
-    /// reserved bytes concurrently through their own raw pointer.
+    /// walker writes only structural bytes; the numeric groups write the
+    /// reserved bytes afterwards, through their own raw pointer.
     pub fn new(
         src: &'a [u8],
         dst: *mut u8,
         dst_len: usize,
-        recs: &'a Recs,
+        recs: &'a mut Recs,
         io: IO,
         proto: Proto,
         dinfo: bool,

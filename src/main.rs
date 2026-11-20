@@ -47,8 +47,8 @@ decompress --gzip writes the demo gzip-compressed (the default for an output
 named *.gz; --no-gzip writes it raw). Sizes take K, M, G suffixes
 (binary: 1M = 1048576). --fast selects per-stream zstd: faster to compress
 and decode, larger (default: normal).
--s cuts the demo into independently decodable segments (default: one,
-which cannot seek; -s 1M for files that will be played or served).
+-s cuts the demo into independently decodable segments (default: 256K;
+0: one segment for the whole demo, which cannot seek).
 --trusted skips the SHA-256 identity check (CRC-32C checks only): only for
 files whose SHA-256 was verified before. attach add --mime defaults to
 application/octet-stream; --meta keys need a prefix, x- or vendor. (FORMAT.md 10.1)."
@@ -106,7 +106,7 @@ fn level_name(l: Level) -> &'static str {
 fn parse(args: &[String]) -> Args {
     let mut a = Args {
         levels: vec![Level::Normal],
-        seg: 0,
+        seg: mvdz::DEFAULT_SEGMENT,
         threads: std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1),

@@ -21,14 +21,11 @@ use crate::error::{Error, Result, bad};
 use crate::format::*;
 use crate::meta::Scanner;
 use crate::proto::{Proto, frame_len};
-use crate::segment::frame_scan;
+use crate::segment::{DEFAULT_SEGMENT, frame_scan};
 use crate::util::{Crc, usz};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
 // ---------------------------------------------------------------- encoder
-
-/// Default segment size of the streaming encoder.
-pub const STREAM_SEGMENT: usize = 1 << 20;
 
 pub struct StreamEncoder<W: Write> {
     w: W,
@@ -54,13 +51,13 @@ pub struct StreamEncoder<W: Write> {
 }
 
 impl<W: Write> StreamEncoder<W> {
-    /// `cfg.segment` is the segment size (0 = 1 MiB). The configuration
+    /// `cfg.segment` is the segment size (0 = the default, 256 KiB). The configuration
     /// (extension metadata) is checked before anything is written.
     pub fn new(mut w: W, cfg: &Config) -> Result<Self> {
         check_config(cfg)?;
         let mut cfg = cfg.clone();
         if cfg.segment == 0 {
-            cfg.segment = STREAM_SEGMENT;
+            cfg.segment = DEFAULT_SEGMENT;
         }
         let p = prefix(F_STREAMED, 0);
         w.write_all(&p)?;
@@ -179,7 +176,6 @@ impl<W: Write> StreamEncoder<W> {
                 self.raw,
                 t_start,
                 doff,
-                self.cfg.threads.max(1),
                 &mut st,
                 &[],
             ) {
@@ -191,7 +187,7 @@ impl<W: Write> StreamEncoder<W> {
         if let (Some(b), true) = (&body, self.cfg.verify) {
             let ok = parse_seg_hdr(b).ok().is_some_and(|h| {
                 let mut dst = vec![0u8; seg.len()];
-                decode_segment_share(share, None, b, &h, &mut dst, 1, &Budget::unlimited()).is_ok()
+                decode_segment_share(share, None, b, &h, &mut dst, &Budget::unlimited()).is_ok()
                     && dst == seg
             });
             if !ok {
@@ -348,7 +344,6 @@ pub struct Reader<S: Source> {
     at: usize,
     done: bool,
     failed: Option<Error>,
-    threads: usize,
     budget: Budget,
     /// whole-demo checks while reading from the first segment on
     check: Option<DemoCheck>,
@@ -356,7 +351,7 @@ pub struct Reader<S: Source> {
 
 impl<R: Read> Reader<Seq<R>> {
     /// Sequential decoding from any reader.
-    pub fn new(r: R, threads: usize, opts: &ReadOptions) -> Result<Self> {
+    pub fn new(r: R, opts: &ReadOptions) -> Result<Self> {
         let mut r = Seq(r);
         let mut p = [0u8; PREFIX_LEN];
         let mut n = 0;
@@ -383,7 +378,6 @@ impl<R: Read> Reader<Seq<R>> {
             at: 0,
             done: false,
             failed: None,
-            threads: threads.max(1),
             budget,
             check,
         })
@@ -394,7 +388,7 @@ impl<R: Read + Seek> Reader<Seekable<R>> {
     /// Opens a complete file for random access: checks its whole section
     /// structure (the same rules as every other reader) and positions at
     /// the first segment.
-    pub fn open(r: R, threads: usize, opts: &ReadOptions) -> Result<Self> {
+    pub fn open(r: R, opts: &ReadOptions) -> Result<Self> {
         let budget = Budget::reading(opts);
         let mut src = SeekSrc(r);
         let len = crate::decode::Src::len(&mut src)?;
@@ -410,7 +404,6 @@ impl<R: Read + Seek> Reader<Seekable<R>> {
             at: 0,
             done: false,
             failed: None,
-            threads: threads.max(1),
             budget,
             check,
         })
@@ -498,7 +491,7 @@ impl<S: Source> Reader<S> {
         let charge = self.budget.alloc(h.raw_len)?;
         self.budget.work(h.raw_len)?;
         let mut out = zeroed(n)?;
-        let tm = decode_segment(&self.lay, body, h, &mut out, self.threads, &self.budget)?;
+        let tm = decode_segment(&self.lay, body, h, &mut out, &self.budget)?;
         if let Some(c) = self.check.as_mut() {
             c.segment(h, &out, tm)?;
         }

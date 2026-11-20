@@ -8,17 +8,19 @@ use crate::decode::{SliceSrc, decode_segment, scan_layout};
 use crate::error::{Error, Result};
 use crate::format::*;
 use crate::proto::Proto;
-use crate::segment::{self, Level, StreamStat, Walked, cut_points, frame_scan};
+use crate::segment::{self, DEFAULT_SEGMENT, Level, StreamStat, Walked, cut_points, frame_scan};
 use crate::util::{crc32, par_map};
 
 /// Compression settings.
 #[derive(Clone, Debug)]
 pub struct Config {
     pub level: Level,
-    /// Independent, seekable segments of about this many raw bytes (0 =
-    /// the whole demo is one segment).
+    /// Independent, seekable segments of about this many raw bytes
+    /// (default 256 KiB). 0: one segment for the whole demo; the streaming
+    /// writer takes 0 as the default instead.
     pub segment: usize,
-    /// Worker threads.
+    /// Worker threads of one-shot compression, one segment each. The
+    /// streaming writer codes on the calling thread.
     pub threads: usize,
     /// Decode the result and compare (falling back per segment on a
     /// mismatch). On by default; off only for experiments.
@@ -31,7 +33,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             level: Level::Normal,
-            segment: 0,
+            segment: DEFAULT_SEGMENT,
             threads: 1,
             verify: true,
             ext: Vec::new(),
@@ -121,14 +123,11 @@ pub fn transform_body(
     raw_off: u64,
     t_start: u64,
     dinfo_off: u64,
-    threads: usize,
     st: &mut Vec<StreamStat>,
     shared: &[Option<Shared>],
 ) -> Option<Vec<u8>> {
     let mut b = seg_hdr_bytes(raw_off, s.len() as u64, t_start, crc32(s), C_TRANSFORM);
-    b.extend_from_slice(&segment::encode(
-        s, wk, level, dinfo_off, threads, st, shared,
-    ));
+    b.extend_from_slice(&segment::encode(s, wk, level, dinfo_off, st, shared));
     seg_ratio_ok(s.len() as u64, b.len() as u64).then_some(b)
 }
 
@@ -162,11 +161,6 @@ fn compress_inner(src: &[u8], cfg: &Config, force_raw: bool) -> Result<(Vec<u8>,
     let md0 = Metadata::from_scan(crate::meta::scan(src), cfg.ext.clone());
     let (mut proto, mut t, mut dt) = (Proto::default(), 0u64, 0usize);
     let plans = plan(src, &cuts, &mut proto, &mut t, &mut dt);
-    let (outer, inner) = if nseg >= threads {
-        (threads, 1)
-    } else {
-        (1, threads)
-    };
     // a segmented file at the normal level: one model per rANS stream from
     // its symbols in every segment, in the TABLES section (FORMAT.md §12)
     let shared = if cfg.level == Level::Normal && nseg > 1 && !force_raw {
@@ -185,9 +179,7 @@ fn compress_inner(src: &[u8], cfg: &Config, force_raw: bool) -> Result<(Vec<u8>,
         .map(|p| force_raw || p.walked.is_none())
         .collect();
     for _round in 0..2 {
-        let (out, info) = assemble(
-            src, &cuts, &plans, &raw, &md0, cfg.level, &shared, outer, inner,
-        )?;
+        let (out, info) = assemble(src, &cuts, &plans, &raw, &md0, cfg.level, &shared, threads)?;
         if !cfg.verify {
             return Ok((out, info));
         }
@@ -219,8 +211,7 @@ fn assemble(
     md0: &Metadata,
     level: Level,
     shared: &[Option<Shared>],
-    outer: usize,
-    inner: usize,
+    threads: usize,
 ) -> Result<(Vec<u8>, Info)> {
     let nseg = plans.len();
     let mut md = md0.clone();
@@ -231,7 +222,7 @@ fn assemble(
             md.demoinfo.extend_from_slice(wk.dinfo());
         }
     }
-    let bodies: Vec<(Vec<u8>, bool, Vec<StreamStat>)> = par_map(outer, nseg, |i| {
+    let bodies: Vec<(Vec<u8>, bool, Vec<StreamStat>)> = par_map(threads, nseg, |i| {
         let s = &src[cuts[i]..cuts[i + 1]];
         let mut st = Vec::new();
         if let (Some(wk), false) = (&plans[i].walked, raw[i]) {
@@ -242,7 +233,6 @@ fn assemble(
                 cuts[i] as u64,
                 plans[i].t_start,
                 doff[i],
-                inner,
                 &mut st,
                 shared,
             ) {
@@ -264,7 +254,7 @@ fn assemble(
     }
     if md_final.demoinfo != md.demoinfo {
         let raw2: Vec<bool> = bodies.iter().map(|b| b.1).collect();
-        return assemble(src, cuts, plans, &raw2, md0, level, shared, outer, inner);
+        return assemble(src, cuts, plans, &raw2, md0, level, shared, threads);
     }
     let mut out = prefix(0, PREFIX_LEN as u64);
     section(&mut out, K_META, &md.encode_for(level)?);
@@ -341,7 +331,7 @@ pub fn failing_segments(
         let want = &src[cuts[i]..cuts[i + 1]];
         let mut dst = vec![0u8; want.len()];
         let body = &file[s.body_off() as usize..s.end() as usize];
-        decode_segment(&lay, body, h, &mut dst, 1, &budget).is_err() || dst != want
+        decode_segment(&lay, body, h, &mut dst, &budget).is_err() || dst != want
     });
     // a file whose segments all decode but which still fails is not
     // fixable by falling back

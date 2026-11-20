@@ -664,8 +664,8 @@ Per segment:
       numeric stream must be complete.
 3. `crc32c(output) == crc`.
 
-The reference runs segments, and within a segment the blob decoding and
-wave 1, in parallel; the bits do not depend on this.
+The reference decodes segments in parallel and each segment on one
+thread; the bits do not depend on this.
 
 Then, for the whole demo (a reader that decodes every segment from the
 first; a reader that starts in the middle checks only per segment):
@@ -1965,7 +1965,7 @@ The streaming encoder compresses a demo that is still being recorded:
 * The configuration (extension metadata) is checked when the writer is
   created, before anything is written. A write that would start a
   segment beyond the reference's limit of 65536 segments per file fails.
-* It cuts a segment whenever at least the segment size (default 1 MiB) of
+* It cuts a segment whenever at least the segment size (default 256 KiB) of
   whole frames has arrived, codes it, decodes it again to check it (falling
   back to zstd or stored bytes on a mismatch), and writes it at once. Bytes
   that do not form a whole frame wait for more data; at the end they are
@@ -2066,10 +2066,10 @@ of rule 10).
 
 ## 13. Notes for implementers
 
-1. **Determinism of the walker vs numeric groups.** The reference runs wave
-   1 concurrently with the walk (pipelined) and splits groups differently
-   by thread count; the bits do not depend on this. A straightforward port
-   can: walk, then each wave-1 stream, then snd.o and te.o.
+1. **Order of the walker and numeric groups.** The reference walks, then
+   runs each wave-1 group, then snd.o and te.o. Wave 1 may also run
+   concurrently with the walk, following its record lists; the bits do not
+   depend on this.
 2. **Record list capacity.** The reference sizes record lists from stream
    counts (`Recs::fixed`) and fails if the walk pushes more records than
    that (more PeRecs than `count(pe.bits)`, ...). Every record consumes a

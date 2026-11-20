@@ -324,7 +324,7 @@ fn r_m4_section_bookkeeping() {
         mvdz::decompress_with(&f, 1, &l).unwrap_err(),
         Error::Limit("memory")
     );
-    let mut r = mvdz::Reader::new(Cursor::new(&f), 1, &l).unwrap();
+    let mut r = mvdz::Reader::new(Cursor::new(&f), &l).unwrap();
     let mut out = Vec::new();
     assert!(std::io::Read::read_to_end(&mut r, &mut out).is_err());
 }
@@ -397,7 +397,7 @@ fn r_m6_reentrant_callbacks() {
         });
         let up = &mut *u as *mut Reent as *mut std::ffi::c_void;
         let mut err = 0;
-        let r = unsafe { mvdz_open_callbacks(Some(re_read), None, up, 1, 0, 0, &mut err) };
+        let r = unsafe { mvdz_open_callbacks(Some(re_read), None, up, 0, 0, &mut err) };
         assert!(!r.is_null());
         u.handle = r;
         let mut out = Vec::new();
@@ -592,7 +592,7 @@ fn trusted_mode() {
         Error::Corrupt("identity mismatch")
     );
     let d = mvdz::decompress_with(&forged, 1, &t).unwrap();
-    let mut r = mvdz::Reader::new(Cursor::new(&forged), 1, &t).unwrap();
+    let mut r = mvdz::Reader::new(Cursor::new(&forged), &t).unwrap();
     let mut o = Vec::new();
     std::io::Read::read_to_end(&mut r, &mut o).unwrap();
     assert_eq!(o, d);
@@ -1021,7 +1021,7 @@ fn c_unknown_flags() {
     unsafe { mvdz_free(out as *mut _, n) };
     let mut err = 0;
     assert!(
-        unsafe { mvdz_open_memory(f.as_ptr() as *const _, f.len(), 1, 0, 1 << 31, &mut err) }
+        unsafe { mvdz_open_memory(f.as_ptr() as *const _, f.len(), 0, 1 << 31, &mut err) }
             .is_null()
     );
     assert_eq!(err, MVDZ_E_INVALID);

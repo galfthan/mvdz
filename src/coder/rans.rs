@@ -878,8 +878,8 @@ impl FileTables {
     }
 
     /// The models, built once by one thread (charged to `budget`; other
-    /// threads wait), so a decode near a memory limit passes or fails the
-    /// same way every time. The result is kept, an error too: a reader
+    /// threads wait), so they are charged once however many segments use
+    /// them. The result is kept, an error too: a reader
     /// whose model build failed must be reopened to try again.
     pub(crate) fn models(&self, budget: &Budget) -> Result<&Models> {
         match self

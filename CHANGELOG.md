@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+* The default segment size is now 256 KiB (`Config::default`, the CLI, and
+  0 for the streaming writer, which was 1 MiB). `-s 0` keeps the whole demo
+  in one segment. With the 65536-segment limit, the default covers demos
+  up to about 16 GiB.
+* Threads now work only across segments, in one-shot compress and
+  decompress and in training the shared models; a segment is coded and
+  decoded on one thread. The output bytes do not change.
+* Breaking: the `threads` argument is gone from `Reader::new`,
+  `Reader::open`, `decompress_stream`, `api::reader`, `mvdz_open_memory`,
+  `mvdz_open_callbacks` and `mvdz_writer_open`.
+
 ## 1.0.0-rc.4
 
 Segmented files at the normal level share one set of rANS models (`-s 256K`

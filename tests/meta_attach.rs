@@ -294,7 +294,7 @@ fn readers_skip_attachments_without_reading_them() {
         ..Default::default()
     };
     let mut out = Vec::new();
-    let mut r = mvdz::Reader::new(Cursor::new(&c2), 1, &limits.into()).unwrap();
+    let mut r = mvdz::Reader::new(Cursor::new(&c2), &limits.into()).unwrap();
     std::io::Read::read_to_end(&mut r, &mut out).unwrap();
     assert_eq!(out, demo);
     // reading the attachment itself needs the memory

@@ -42,7 +42,7 @@ int main(int argc, char **argv) {
     const char *packed = "example_out.mvdz";
     FILE *o = fopen(packed, "wb");
     int err = 0;
-    mvdz_writer *w = mvdz_writer_open(f_write, o, MVDZ_LEVEL_NORMAL, 256 * 1024, 1, &err);
+    mvdz_writer *w = mvdz_writer_open(f_write, o, MVDZ_LEVEL_NORMAL, 256 * 1024, &err);
     if (!w) return fail("writer_open", err);
     /* extension metadata: where the demo came from (any time before finish) */
     int rc = mvdz_writer_set_ext(w, "source", "example.c", 9);
@@ -69,7 +69,7 @@ int main(int argc, char **argv) {
 
     /* 3. decode through callbacks and compare */
     fseek(p, 0, SEEK_SET);
-    mvdz_reader *r = mvdz_open_callbacks(f_read, f_seek, p, 2, 0, 0, &err);
+    mvdz_reader *r = mvdz_open_callbacks(f_read, f_seek, p, 0, 0, &err);
     if (!r) return fail("open_callbacks", err);
     printf("raw size %lld, segments %lld\n", mvdz_raw_size(r), mvdz_segment_count(r));
     unsigned char *back = malloc(n + 1);
@@ -112,12 +112,12 @@ int main(int argc, char **argv) {
 
     /* 6. corrupt input never crashes */
     unsigned char junk[64] = "MVDZ\x01";
-    r = mvdz_open_memory(junk, sizeof junk, 1, 0, 0, &err);
+    r = mvdz_open_memory(junk, sizeof junk, 0, 0, &err);
     printf("garbage: %s\n", r ? "opened?!" : mvdz_strerror(err));
     if (r) mvdz_close(r);
     /* 7. an aborted recording: no trailer, its segments still decode */
     o = fopen(packed, "wb");
-    w = mvdz_writer_open(f_write, o, MVDZ_LEVEL_FAST, 64 * 1024, 1, &err);
+    w = mvdz_writer_open(f_write, o, MVDZ_LEVEL_FAST, 64 * 1024, &err);
     if (!w) return fail("writer_open", err);
     rc = mvdz_writer_write(w, demo, (size_t)(n / 2));
     if (rc) return fail("writer_write", rc);

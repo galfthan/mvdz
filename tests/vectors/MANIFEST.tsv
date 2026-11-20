@@ -1,7 +1,7 @@
 # file	decoded_sha256 or "error: <message>"	decoded_size	how it was made
 # Valid files must decode to the SHA-256; hostile files must be refused. The message is the reference's: another decoder should report the same category (format, corrupt, limit; FORMAT.md 9), in its own words.
-duel.normal.mvdz	3ff1f82b5f0274da0af3f1744e7660d602159c3edfb0089134b728d3f3408d92	266163	duel = sample 3ff1f82b...8d92; compress
-duel.fast.mvdz	3ff1f82b5f0274da0af3f1744e7660d602159c3edfb0089134b728d3f3408d92	266163	duel = sample 3ff1f82b...8d92; compress --fast
+duel.normal.mvdz	3ff1f82b5f0274da0af3f1744e7660d602159c3edfb0089134b728d3f3408d92	266163	duel = sample 3ff1f82b...8d92; compress -s 0
+duel.fast.mvdz	3ff1f82b5f0274da0af3f1744e7660d602159c3edfb0089134b728d3f3408d92	266163	duel = sample 3ff1f82b...8d92; compress --fast -s 0
 duel.normal.seg64k.mvdz	3ff1f82b5f0274da0af3f1744e7660d602159c3edfb0089134b728d3f3408d92	266163	duel = sample 3ff1f82b...8d92; compress -s 64K --ext source=hub
 duel.fast.seg64k.mvdz	3ff1f82b5f0274da0af3f1744e7660d602159c3edfb0089134b728d3f3408d92	266163	duel = sample 3ff1f82b...8d92; compress --fast -s 64K
 duel.normal.streamed.mvdz	3ff1f82b5f0274da0af3f1744e7660d602159c3edfb0089134b728d3f3408d92	266163	duel = sample 3ff1f82b...8d92; Writer, segment 64K, 4000-byte writes (META before the demoinfo segment)

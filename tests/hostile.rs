@@ -212,7 +212,7 @@ fn declared_sizes() {
         Err(Error::Limit(_))
     ));
     assert!(
-        mvdz::Reader::open(Cursor::new(&c), 1, &small)
+        mvdz::Reader::open(Cursor::new(&c), &small)
             .and_then(|mut r| r.read_demo(&mut [0; 10]))
             .is_err()
     );

@@ -24,17 +24,14 @@ pub trait NumIO {
     fn code(&mut self, k: usize, ctx: NCtx, v: i32) -> i32;
 }
 
-/// Shared view of the segment buffer. On encode it is the input (never
-/// written); on decode the output. Groups running in parallel write
-/// disjoint byte ranges: every offset comes from the walker's monotonic
+/// View of the segment buffer. On encode it is the input (never written);
+/// on decode the output. Every offset comes from the walker's monotonic
 /// cursor, so no two records share a byte.
 #[derive(Clone, Copy)]
 pub struct Buf {
     ptr: *mut u8,
     len: usize,
 }
-unsafe impl Send for Buf {}
-unsafe impl Sync for Buf {}
 
 impl Buf {
     pub fn new(b: &mut [u8]) -> Buf {
@@ -210,12 +207,6 @@ pub enum Group {
     PiO(u8),
     PiA(u8),
     PeO(u8),
-    /// the three player origin axes in one pass
-    PiOAll,
-    /// the three player angle axes in one pass
-    PiAAll,
-    /// all three entity axes in one pass
-    PeAll,
     Stl,
     /// usercmd angles on the grid
     Uc,
@@ -223,7 +214,7 @@ pub enum Group {
     Te,
 }
 
-/// Wave 1, split per axis (for multi-threaded decoding).
+/// Wave 1, per axis.
 pub const WAVE1: [Group; 11] = [
     Group::PiA(1),
     Group::PiA(0),
@@ -234,14 +225,6 @@ pub const WAVE1: [Group; 11] = [
     Group::PeO(1),
     Group::PeO(2),
     Group::PiA(2),
-    Group::Stl,
-    Group::Uc,
-];
-/// Wave 1 for pipelined decoding next to the walker (one task per worker).
-pub const WAVE1_PIPE: [Group; 5] = [
-    Group::PiAAll,
-    Group::PiOAll,
-    Group::PeAll,
     Group::Stl,
     Group::Uc,
 ];
@@ -260,9 +243,6 @@ impl Group {
             Group::PeO(0) => &[PE_OX, PE_F0],
             Group::PeO(1) => &[PE_OX + 1, PE_F0 + 1],
             Group::PeO(_) => &[PE_OX + 2, PE_F0 + 2],
-            Group::PeAll => &[PE_OX, PE_F0, PE_OX + 1, PE_F0 + 1, PE_OX + 2, PE_F0 + 2],
-            Group::PiOAll => &[PI_OX, PI_F0, PI_OX + 1, PI_F0 + 1, PI_OX + 2, PI_F0 + 2],
-            Group::PiAAll => &[PI_AP, PI_AP + 1, PI_AP + 2],
             Group::Stl => &[STL_VAL],
             Group::Uc => &[UC_A],
             Group::Snd => &[SND_O],
@@ -275,7 +255,7 @@ impl Group {
             Group::PiO(a) => {
                 let mut st = vec![Track::default(); 256];
                 let mut tm = vec![(0u32, 0u32); 256];
-                for r in recs.pi.feed() {
+                for r in recs.pi.iter() {
                     let (dn, dp) = times(&mut tm[r.num as usize], r.t);
                     pi_origin_step::<ENC, IO>(
                         a as usize,
@@ -285,14 +265,13 @@ impl Group {
                         dp,
                         buf,
                         io,
-                        0,
                     );
                 }
             }
             Group::PiA(a) => {
                 let mut st = vec![Track::default(); 256];
                 let mut tm = vec![(0u32, 0u32); 256];
-                for r in recs.pi.feed() {
+                for r in recs.pi.iter() {
                     let (dn, dp) = times(&mut tm[r.num as usize], r.t);
                     pi_angle_step::<ENC, IO>(
                         a as usize,
@@ -302,52 +281,19 @@ impl Group {
                         dp,
                         buf,
                         io,
-                        0,
                     );
-                }
-            }
-            Group::PiOAll => {
-                let mut st = vec![[Track::default(); 3]; 256];
-                let mut tm = vec![(0u32, 0u32); 256];
-                for r in recs.pi.feed() {
-                    let (dn, dp) = times(&mut tm[r.num as usize], r.t);
-                    let s = &mut st[r.num as usize];
-                    for a in 0..3 {
-                        pi_origin_step::<ENC, IO>(a, &mut s[a], r, dn, dp, buf, io, 2 * a);
-                    }
-                }
-            }
-            Group::PiAAll => {
-                let mut st = vec![[Track::default(); 3]; 256];
-                let mut tm = vec![(0u32, 0u32); 256];
-                for r in recs.pi.feed() {
-                    let (dn, dp) = times(&mut tm[r.num as usize], r.t);
-                    let s = &mut st[r.num as usize];
-                    for a in 0..3 {
-                        pi_angle_step::<ENC, IO>(a, &mut s[a], r, dn, dp, buf, io, a);
-                    }
                 }
             }
             Group::PeO(a) => {
                 let mut st = vec![Track::default(); 2048];
-                for r in recs.pe.feed() {
+                for r in recs.pe.iter() {
                     pe_origin_step::<ENC, IO>(
                         a as usize,
                         &mut st[(r.num & 2047) as usize],
                         r,
                         buf,
                         io,
-                        0,
                     );
-                }
-            }
-            Group::PeAll => {
-                let mut st = vec![[Track::default(); 3]; 2048];
-                for r in recs.pe.feed() {
-                    let s = &mut st[(r.num & 2047) as usize];
-                    for a in 0..3 {
-                        pe_origin_step::<ENC, IO>(a, &mut s[a], r, buf, io, 2 * a);
-                    }
                 }
             }
             Group::Stl => stl::<ENC, IO>(recs, buf, io),
@@ -398,7 +344,6 @@ fn pi_origin_step<const ENC: bool, IO: NumIO>(
     dt_prev: i32,
     buf: Buf,
     io: &mut IO,
-    k: usize,
 ) {
     let sent = r.flags & (1 << axis) != 0;
     if r.fl & 1 != 0 {
@@ -408,7 +353,7 @@ fn pi_origin_step<const ENC: bool, IO: NumIO>(
             let c = NCtx {
                 f: [q(s.fres), axis as u8, 0, 0, 0, 0],
             };
-            let (v, d) = x32::<ENC, IO>(buf, off, pred, io, k + 1, c);
+            let (v, d) = x32::<ENC, IO>(buf, off, pred, io, 1, c);
             s.fprev = s.flast;
             s.flast = v;
             s.fres = d;
@@ -431,7 +376,7 @@ fn pi_origin_step<const ENC: bool, IO: NumIO>(
                     0,
                 ],
             };
-            let (v, d) = x16::<ENC, IO>(buf, off, pred, io, k, c);
+            let (v, d) = x16::<ENC, IO>(buf, off, pred, io, 0, c);
             s.res = d;
             v
         } else {
@@ -453,7 +398,6 @@ fn pi_angle_step<const ENC: bool, IO: NumIO>(
     dt_prev: i32,
     buf: Buf,
     io: &mut IO,
-    k: usize,
 ) {
     let v = if r.flags & (8 << axis) != 0 {
         let pred = pred_dt(s.last, s.prev, dt_now, dt_prev);
@@ -472,7 +416,7 @@ fn pi_angle_step<const ENC: bool, IO: NumIO>(
                 0,
             ],
         };
-        let (v, d) = x16::<ENC, IO>(buf, off, pred, io, k, c);
+        let (v, d) = x16::<ENC, IO>(buf, off, pred, io, 0, c);
         s.res = d;
         v
     } else {
@@ -491,7 +435,6 @@ fn pe_origin_step<const ENC: bool, IO: NumIO>(
     r: &PeRec,
     buf: Buf,
     io: &mut IO,
-    k: usize,
 ) {
     let dt_now = r.t.wrapping_sub(s.t_last) as i32;
     s.t_last = r.t;
@@ -503,7 +446,7 @@ fn pe_origin_step<const ENC: bool, IO: NumIO>(
             let c = NCtx {
                 f: [q(s.fres), axis as u8, 0, 0, 0, 0],
             };
-            let (v, d) = x32::<ENC, IO>(buf, off, pred, io, k + 1, c);
+            let (v, d) = x32::<ENC, IO>(buf, off, pred, io, 1, c);
             s.fprev = s.flast;
             s.flast = v;
             s.fres = d;
@@ -521,7 +464,7 @@ fn pe_origin_step<const ENC: bool, IO: NumIO>(
                     0,
                 ],
             };
-            let (v, d) = x16::<ENC, IO>(buf, off, pred, io, k, c);
+            let (v, d) = x16::<ENC, IO>(buf, off, pred, io, 0, c);
             s.res = d;
             s.prev = s.last;
             s.last = v;
@@ -537,7 +480,7 @@ fn pe_origin_step<const ENC: bool, IO: NumIO>(
 fn stl<const ENC: bool, IO: NumIO>(recs: &Recs, buf: Buf, io: &mut IO) {
     let mut last = vec![0u32; 1 << 13];
     let mut lres = vec![0i32; 1 << 13];
-    for r in recs.stl.feed() {
+    for r in recs.stl.iter() {
         let k = (r.key & 0x1fff) as usize;
         let c = NCtx {
             f: [r.key as u8, q(lres[k]), 0, 0, 0, 0],
@@ -552,7 +495,7 @@ fn stl<const ENC: bool, IO: NumIO>(recs: &Recs, buf: Buf, io: &mut IO) {
 /// against the linear prediction from that axis's last two grid values.
 fn uc<const ENC: bool, IO: NumIO>(recs: &Recs, buf: Buf, io: &mut IO) {
     let mut st = vec![[Track::default(); 3]; 256];
-    for r in recs.uc.feed() {
+    for r in recs.uc.iter() {
         let s = &mut st[r.num as usize];
         for (a, t) in s.iter_mut().enumerate() {
             if r.grid & (1 << a) == 0 {
@@ -588,7 +531,7 @@ fn rd_ref(buf: Buf, r: u32) -> u16 {
 }
 
 fn snd<const ENC: bool, IO: NumIO>(recs: &Recs, buf: Buf, io: &mut IO) {
-    for r in recs.snd.feed() {
+    for r in recs.snd.iter() {
         for i in 0..3u32 {
             let pred = rd_ref(buf, r.refs[i as usize]);
             let c = NCtx {
@@ -601,7 +544,7 @@ fn snd<const ENC: bool, IO: NumIO>(recs: &Recs, buf: Buf, io: &mut IO) {
 
 fn te<const ENC: bool, IO: NumIO>(recs: &Recs, buf: Buf, io: &mut IO) {
     let mut last = [0u16; 3];
-    for r in recs.te.feed() {
+    for r in recs.te.iter() {
         if matches!(r.ty, 5 | 6 | 9) {
             let mut start = [0u16; 3];
             for i in 0..3u32 {
