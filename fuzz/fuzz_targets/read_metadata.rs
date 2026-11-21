@@ -10,6 +10,5 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(fi) = mvdz::read_metadata_with(std::io::Cursor::new(data), &l) {
         let j = fi.to_json();
         assert!(serde_json::from_str::<serde_json::Value>(&j).is_ok() || j.is_empty());
-        let _ = fi.meta.demoinfo_json();
     }
 });

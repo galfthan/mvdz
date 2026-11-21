@@ -51,8 +51,6 @@ pub const DIR_MAX: u64 = 1 << 24;
 /// Largest TABLES section body.
 pub const TABLES_MAX: u64 = 1 << 24;
 /// Encoder caps for metadata values (FORMAT.md, "Metadata").
-pub const META_VALUE_MAX: usize = 1 << 16;
-pub const ROSTER_VALUE_MAX: usize = 1 << 12;
 pub const DEMOINFO_MAX: usize = 4 << 20;
 pub const EXT_MAX: usize = 1 << 20;
 
@@ -72,7 +70,7 @@ pub fn seg_ratio_ok(raw_len: u64, len: u64) -> bool {
     raw_len <= MAX_SEG_RAW && ratio_ok(raw_len, len)
 }
 
-/// Checks extension metadata (FORMAT.md §3, tag 10) before anything is
+/// Checks extension metadata (FORMAT.md §3, tag 5) before anything is
 /// written: at most 1 MiB of keys and values, keys unique.
 pub fn check_ext(ext: &[(String, Vec<u8>)]) -> Result<()> {
     let ext_len: usize = ext.iter().map(|(k, v)| k.len() + v.len()).sum();
@@ -180,43 +178,25 @@ pub fn sec_hdr(h: &[u8], off: u64) -> Sec {
 pub const T_SHA256: u64 = 1;
 pub const T_SIZE: u64 = 2;
 pub const T_DEMOINFO: u64 = 3;
-pub const T_SERVERINFO: u64 = 4;
-pub const T_LEVELNAME: u64 = 5;
-pub const T_MAP: u64 = 6;
-pub const T_ROSTER: u64 = 7;
-pub const T_TIMING: u64 = 8;
-pub const T_CENSUS: u64 = 9;
-pub const T_EXT: u64 = 10;
-pub const T_START_MS: u64 = 11;
-pub const T_EPOCH: u64 = 12;
-pub const T_MATCHDATE: u64 = 13;
-pub const T_PAUSES: u64 = 14;
-const N_TAGS: usize = 15;
+pub const T_TIMING: u64 = 4;
+pub const T_EXT: u64 = 5;
+/// Tags 1 to 5 occur at most once.
+const N_TAGS: usize = 6;
 
-/// Demo metadata (the META section), raw facts only.
+/// Demo metadata (the META section): what decoding needs and checks, and
+/// the writer's extension key/values. No game content (FORMAT.md §3).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Metadata {
     /// SHA-256 of the original .mvd: the demo's identity
     pub sha256: [u8; 32],
     pub size: u64,
-    /// KTX demoinfo blocks, `[u32 len][body]` each, in file order
+    /// KTX demoinfo blocks the segments share, `[u32 len][body]` each, in
+    /// file order
     pub demoinfo: Vec<u8>,
-    /// first `fullserverinfo` string, verbatim
-    pub serverinfo: Vec<u8>,
-    /// level name from the first svc_serverdata
-    pub levelname: Vec<u8>,
-    /// first modellist entry (the map model)
-    pub map: Vec<u8>,
-    /// (slot, userid, userinfo) at the first playerinfo
-    pub roster: Vec<(u8, u32, Vec<u8>)>,
     pub duration_ms: u64,
     pub frames: u64,
-    /// census JSON
-    pub census: String,
     /// extension key/values, not part of the demo bytes
     pub ext: Vec<(String, Vec<u8>)>,
-    /// wall-clock sources and pauses (FORMAT.md §3.1)
-    pub clock: crate::meta::Clock,
 }
 
 fn put_bytes(o: &mut Vec<u8>, b: &[u8]) {
@@ -241,33 +221,16 @@ pub fn demoinfo_ok(b: &[u8]) -> bool {
 }
 
 impl Metadata {
-    /// Metadata from a scan of the demo, with the encoder caps applied
-    /// (oversized values are left out).
-    pub fn from_scan(s: crate::meta::Scan, ext: Vec<(String, Vec<u8>)>) -> Metadata {
-        let cap = |v: Vec<u8>| {
-            if v.len() > META_VALUE_MAX {
-                Vec::new()
-            } else {
-                v
-            }
-        };
+    /// Metadata of a demo from its identity (the demoinfo store is filled
+    /// in by the encoder).
+    pub fn new(mut id: crate::ident::Ident, ext: Vec<(String, Vec<u8>)>) -> Metadata {
         Metadata {
-            sha256: s.sha256,
-            size: s.size,
+            sha256: id.sha256(),
+            size: id.size,
             demoinfo: Vec::new(),
-            serverinfo: cap(s.serverinfo),
-            levelname: cap(s.levelname),
-            map: cap(s.map),
-            roster: s
-                .roster
-                .into_iter()
-                .filter(|r| !r.2.is_empty() && r.2.len() <= ROSTER_VALUE_MAX)
-                .collect(),
-            duration_ms: s.duration_ms,
-            frames: s.frames,
-            census: s.census,
+            duration_ms: id.duration_ms,
+            frames: id.frames,
             ext,
-            clock: s.clock,
         }
     }
 
@@ -291,46 +254,10 @@ impl Metadata {
         if !self.demoinfo.is_empty() {
             field(T_DEMOINFO, &self.demoinfo);
         }
-        field(T_SERVERINFO, &self.serverinfo);
-        field(T_LEVELNAME, &self.levelname);
-        field(T_MAP, &self.map);
-        let mut v = Vec::new();
-        put_uv(&mut v, self.roster.len() as u64);
-        for (s, u, i) in &self.roster {
-            put_uv(&mut v, *s as u64);
-            put_uv(&mut v, *u as u64);
-            put_bytes(&mut v, i);
-        }
-        field(T_ROSTER, &v);
         let mut v = Vec::new();
         put_uv(&mut v, self.duration_ms);
         put_uv(&mut v, self.frames);
         field(T_TIMING, &v);
-        field(T_CENSUS, self.census.as_bytes());
-        let c = &self.clock;
-        if let Some((t, ms)) = c.start_ms {
-            let mut v = Vec::new();
-            put_uv(&mut v, t);
-            put_uv(&mut v, ms);
-            field(T_START_MS, &v);
-        }
-        for (tag, x) in [(T_EPOCH, &c.epoch), (T_MATCHDATE, &c.matchdate)] {
-            if let Some((t, raw)) = x {
-                let mut v = Vec::new();
-                put_uv(&mut v, *t);
-                v.extend_from_slice(raw);
-                field(tag, &v);
-            }
-        }
-        if !c.pauses.is_empty() {
-            let mut v = vec![c.pauses_truncated as u8];
-            put_uv(&mut v, c.pauses.len() as u64);
-            for &(t, ms) in &c.pauses {
-                put_uv(&mut v, t);
-                put_uv(&mut v, ms);
-            }
-            field(T_PAUSES, &v);
-        }
         if !self.ext.is_empty() {
             let mut v = Vec::new();
             put_uv(&mut v, self.ext.len() as u64);
@@ -405,31 +332,10 @@ impl Metadata {
                     }
                     m.demoinfo = v.to_vec()
                 }
-                T_SERVERINFO => m.serverinfo = v.to_vec(),
-                T_LEVELNAME => m.levelname = v.to_vec(),
-                T_MAP => m.map = v.to_vec(),
-                T_ROSTER => {
-                    let n = f.uz().ok_or(e)?;
-                    if n > 256 {
-                        return Err(e);
-                    }
-                    let mut last: Option<u8> = None;
-                    for _ in 0..n {
-                        let s = u8::try_from(f.uv().ok_or(e)?).map_err(|_| e)?;
-                        let u = f.u32v().ok_or(e)?;
-                        let i = f.bytes().ok_or(e)?;
-                        if last.is_some_and(|l| s <= l) {
-                            return bad("roster order");
-                        }
-                        last = Some(s);
-                        m.roster.push((s, u, i.to_vec()));
-                    }
-                }
                 T_TIMING => {
                     m.duration_ms = f.uv().ok_or(e)?;
                     m.frames = f.uv().ok_or(e)?;
                 }
-                T_CENSUS => m.census = String::from_utf8(v.to_vec()).map_err(|_| e)?,
                 T_EXT => {
                     let n = f.uz().ok_or(e)?;
                     // every entry takes at least 2 bytes
@@ -445,44 +351,10 @@ impl Metadata {
                         m.ext.push((k.to_string(), f.bytes().ok_or(e)?.to_vec()));
                     }
                 }
-                T_START_MS => m.clock.start_ms = Some((f.uv().ok_or(e)?, f.uv().ok_or(e)?)),
-                T_EPOCH | T_MATCHDATE => {
-                    let t = f.uv().ok_or(e)?;
-                    let raw = f.rest();
-                    if raw.len() > crate::meta::CLOCK_STR_LEN {
-                        return Err(e);
-                    }
-                    let x = Some((t, raw.to_vec()));
-                    if tag == T_EPOCH {
-                        m.clock.epoch = x
-                    } else {
-                        m.clock.matchdate = x
-                    }
-                    f.i = v.len();
-                }
-                T_PAUSES => {
-                    let tr = f.u8().ok_or(e)?;
-                    let n = f.uz().ok_or(e)?;
-                    if tr > 1 || n == 0 || n > crate::meta::PAUSE_RUNS_MAX {
-                        return Err(e);
-                    }
-                    m.clock.pauses_truncated = tr == 1;
-                    for _ in 0..n {
-                        let t = f.uv().ok_or(e)?;
-                        if m.clock.pauses.last().is_some_and(|l| t <= l.0) {
-                            return bad("pause order");
-                        }
-                        m.clock.pauses.push((t, f.uv().ok_or(e)?));
-                    }
-                }
                 _ => continue,
             }
             // a known tag's value is consumed exactly
-            if matches!(
-                tag,
-                T_SIZE | T_ROSTER | T_TIMING | T_EXT | T_START_MS | T_PAUSES
-            ) && !f.done()
-            {
+            if matches!(tag, T_SIZE | T_TIMING | T_EXT) && !f.done() {
                 return Err(e);
             }
         }
@@ -496,24 +368,7 @@ impl Metadata {
     /// budget for keeping it).
     pub fn heap_size(&self) -> u64 {
         let ext: usize = self.ext.iter().map(|(k, v)| k.len() + v.len() + 48).sum();
-        let roster: usize = self.roster.iter().map(|r| r.2.len() + 32).sum();
-        let c = &self.clock;
-        let clock = c.epoch.as_ref().map_or(0, |x| x.1.len())
-            + c.matchdate.as_ref().map_or(0, |x| x.1.len())
-            + 16 * c.pauses.len();
-        (self.demoinfo.len()
-            + self.serverinfo.len()
-            + self.levelname.len()
-            + self.map.len()
-            + self.census.len()
-            + ext
-            + roster
-            + clock) as u64
-    }
-
-    /// The reassembled KTX demoinfo JSON, if the demo has one.
-    pub fn demoinfo_json(&self) -> Option<Vec<u8>> {
-        crate::meta::demoinfo_json(&self.demoinfo)
+        (self.demoinfo.len() + ext) as u64
     }
 }
 

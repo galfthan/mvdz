@@ -181,6 +181,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvdz-meta"
+version = "1.0.0-rc.4"
+dependencies = [
+ "mvdz",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"

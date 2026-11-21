@@ -59,7 +59,6 @@ fn structure_rules() {
     // a second META (forged identity) anywhere: refused (robustness 9)
     let mut forged = Metadata::decode(&meta.1, &mvdz::budget::Budget::unlimited()).unwrap();
     forged.sha256 = [0xff; 32];
-    forged.map = b"maps/forged.bsp".to_vec();
     let mut s2 = secs.clone();
     s2.insert(iix, (K_META, meta_body(&forged)));
     refused(&build(0, true, &s2, true), "second META", |e| {

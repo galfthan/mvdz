@@ -17,6 +17,26 @@
 * Breaking: the `threads` argument is gone from `Reader::new`,
   `Reader::open`, `decompress_stream`, `api::reader`, `mvdz_open_memory`,
   `mvdz_open_callbacks` and `mvdz_writer_open`.
+* The metadata (META) holds only what decoding needs and checks, and the
+  writer's extension keys: tags 1 sha256, 2 size, 3 demoinfo, 4 timing
+  (was 8) and 5 ext (was 10). Server info, level name, map, roster, the
+  census and the wall-clock tags (start timestamp, epoch, matchdate,
+  pauses) are gone: they are the demo's content, and the demo has them.
+  Files are about 2.5 KB smaller (the META of 40 sample demos).
+* New tool `mvdz-meta` (package `meta/`) reads what a demo contains from
+  the demo itself (a `.mvdz` is decoded first; `.mvd.gz` gunzipped): map,
+  server settings, wall-clock sources (now also `matchkey:`), pauses, the
+  players at the start and every later change (joins, spectators, drops,
+  reconnects, renames, setinfo), KTX stats and the census. Text by
+  default, `--json` for one object per demo. It replaces `mvdz census`;
+  its output is informative and may change between versions.
+* Breaking: `mvdz census` is removed; `mvdz info`, `FileInfo::to_json` and
+  `mvdz_info_json` render only identity, timing, extension keys and the
+  index. `Metadata` keeps `sha256`, `size`, `demoinfo`, `duration_ms`,
+  `frames` and `ext`. The library module `meta` is gone (the scanner is in
+  `mvdz-meta`); `ident` holds the identity pass and the input check.
+* The repository is a Cargo workspace (`mvdz`, `meta`): CI and the
+  release build both, and the release archives include `mvdz-meta`.
 
 ## 1.0.0-rc.4
 

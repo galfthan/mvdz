@@ -1,12 +1,12 @@
-//! Demo metadata: identity, verbatim server/roster strings, timing, and a
-//! census of what the demo contains. Collected by a scan of the raw demo
-//! (independent of the transform), so it also runs on plain `.mvd` files.
+//! A scan of a raw demo: identity, verbatim server and player strings with
+//! the demo time they appeared at, wall-clock sources, and a census of what
+//! the demo contains. It reads the demo itself (a decoded .mvdz, or a .mvd),
+//! not anything the .mvdz format stores.
 //!
-//! Everything here is raw fact: names, counts, verbatim strings. There is
-//! no interpretation (no mode classification, team assignment, identity
-//! folding).
+//! The scan keeps raw facts: names, counts, verbatim strings. Rendering
+//! (`report`) reads them for people.
 
-use crate::proto::*;
+use mvdz::proto::*;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -23,9 +23,69 @@ pub const KEY_LEN: usize = 64;
 /// newline, is dropped).
 pub const LINE_LEN: usize = 1 << 16;
 
-/// Wall-clock sources and pauses (FORMAT.md §3.1): caps.
+/// Wall-clock sources and pauses: caps.
 pub const CLOCK_STR_LEN: usize = 128;
 pub const PAUSE_RUNS_MAX: usize = 1 << 16;
+/// Player log: caps on changes and on string bytes.
+pub const PLAYER_LOG_MAX: usize = 1 << 16;
+pub const PLAYER_LOG_BYTES: usize = 1 << 20;
+
+/// One change to a slot's userinfo, as the demo sends it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InfoChange {
+    /// svc_updateuserinfo: the slot's userid and whole userinfo string
+    /// (empty: the slot was freed)
+    User { userid: u32, info: Vec<u8> },
+    /// svc_setinfo: one key of the slot's userinfo
+    Set { key: Vec<u8>, value: Vec<u8> },
+}
+
+impl InfoChange {
+    /// String bytes counted against [`PLAYER_LOG_BYTES`].
+    pub fn str_len(&self) -> usize {
+        match self {
+            InfoChange::User { info, .. } => info.len(),
+            InfoChange::Set { key, value } => key.len() + value.len(),
+        }
+    }
+}
+
+/// Every userinfo change of the demo, in demo order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PlayerLog {
+    /// (demo_ms, slot, change)
+    pub changes: Vec<(u64, u8, InfoChange)>,
+    /// changes before the first svc_playerinfo (all of them if none)
+    pub start: usize,
+    /// more changes existed than the caps allow: the list stops there
+    pub truncated: bool,
+}
+
+impl PlayerLog {
+    /// The slot table (slot, userid, userinfo) after the first `n`
+    /// changes, from the svc_updateuserinfo ones; freed slots left out.
+    pub fn slots_at(&self, n: usize) -> Vec<(u8, u32, Vec<u8>)> {
+        let mut t: BTreeMap<u8, (u32, &[u8])> = BTreeMap::new();
+        for (_, s, c) in self.changes.iter().take(n) {
+            if let InfoChange::User { userid, info } = c {
+                t.insert(*s, (*userid, info));
+            }
+        }
+        t.into_iter()
+            .filter(|(_, (_, i))| !i.is_empty())
+            .map(|(s, (u, i))| (s, u, i.to_vec()))
+            .collect()
+    }
+
+    /// The roster: the slot table at the first svc_playerinfo.
+    pub fn roster(&self) -> Vec<(u8, u32, Vec<u8>)> {
+        self.slots_at(self.start)
+    }
+}
+
+/// bytes after the prefix of a split `matchkey:` line joined before
+/// trimming and the cap
+const MATCHKEY_JOIN: usize = 2 * CLOCK_STR_LEN;
 
 /// Wall-clock facts of a demo, each with the demo time (ms) it appeared at.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -36,6 +96,9 @@ pub struct Clock {
     pub epoch: Option<(u64, Vec<u8>)>,
     /// KTX `matchdate:` print: the raw date text after the prefix
     pub matchdate: Option<(u64, Vec<u8>)>,
+    /// `matchkey:` print (older mods): the raw text after the prefix,
+    /// joined over the prints that carry the rest of its line
+    pub matchkey: Option<(u64, Vec<u8>)>,
     /// paused runs (demo ms, real ms paused there), demo ms increasing
     pub pauses: Vec<(u64, u64)>,
     /// more than PAUSE_RUNS_MAX runs: the list stops there
@@ -180,10 +243,13 @@ pub struct Scanner {
     sd_first: Option<(u32, u32, u32, u32, Vec<u8>, Vec<u8>)>,
     /// first fullserverinfo string, verbatim
     pub serverinfo: Option<Vec<u8>>,
-    roster: BTreeMap<u8, (u32, Vec<u8>)>,
-    roster_start: Option<BTreeMap<u8, (u32, Vec<u8>)>>,
+    players: PlayerLog,
+    player_bytes: usize,
+    playerinfo_seen: bool,
     demo_start_ts: Option<u64>,
     clock: Clock,
+    /// a `matchkey:` line still waiting for its newline
+    matchkey_open: Option<(u64, Vec<u8>)>,
     /// mvdhidden_demoinfo blocks in file order, each `[u32 len][body]`
     pub demoinfo: Vec<u8>,
 }
@@ -199,7 +265,7 @@ fn str_at(b: &[u8]) -> &[u8] {
     &b[..n]
 }
 
-fn info_pairs(s: &[u8]) -> Vec<(&[u8], &[u8])> {
+pub fn info_pairs(s: &[u8]) -> Vec<(&[u8], &[u8])> {
     // "\key\value\key\value"
     let mut out = Vec::new();
     let parts: Vec<&[u8]> = s.split(|&c| c == b'\\').collect();
@@ -250,9 +316,11 @@ impl Scanner {
             serverdata: 0,
             sd_first: None,
             serverinfo: None,
-            roster: BTreeMap::new(),
-            roster_start: None,
+            players: PlayerLog::default(),
+            player_bytes: 0,
+            playerinfo_seen: false,
             demo_start_ts: None,
+            matchkey_open: None,
             clock: Clock::default(),
             demoinfo: Vec::new(),
         }
@@ -280,6 +348,8 @@ impl Scanner {
     }
 
     fn frame(&mut self, f: &[u8], off: u64) {
+        // a `matchkey:` line joins only the prints of its own frame
+        self.matchkey_close();
         self.frames += 1;
         self.t_ms += f[0] as u64;
         let ty = f[1];
@@ -359,7 +429,47 @@ impl Scanner {
         }
     }
 
+    /// Logs one userinfo change; past the caps the log stops (truncated).
+    fn player(&mut self, slot: u8, c: InfoChange) {
+        let pl = &mut self.players;
+        if pl.truncated {
+            return;
+        }
+        let n = c.str_len();
+        if pl.changes.len() == PLAYER_LOG_MAX || self.player_bytes + n > PLAYER_LOG_BYTES {
+            pl.truncated = true;
+            return;
+        }
+        self.player_bytes += n;
+        pl.changes.push((self.t_ms, slot, c));
+    }
+
+    /// Adds the text of one print to the open `matchkey:` line; a newline
+    /// (or the cap) closes it.
+    fn matchkey_part(&mut self, text: &[u8]) {
+        let Some((_, line)) = self.matchkey_open.as_mut() else {
+            return;
+        };
+        let nl = text.iter().position(|&c| c == b'\n');
+        let part = &text[..nl.unwrap_or(text.len())];
+        let room = MATCHKEY_JOIN - line.len();
+        line.extend_from_slice(&part[..part.len().min(room)]);
+        if nl.is_some() || line.len() == MATCHKEY_JOIN {
+            self.matchkey_close();
+        }
+    }
+
+    fn matchkey_close(&mut self) {
+        if let Some((t, line)) = self.matchkey_open.take() {
+            self.clock.matchkey = Some((t, cut(line.trim_ascii(), CLOCK_STR_LEN)));
+        }
+    }
+
     fn command(&mut self, cmd: u8, b: &[u8], dest: u64) {
+        // ... that directly follow it
+        if cmd != 8 {
+            self.matchkey_close();
+        }
         match cmd {
             8 => {
                 self.print[(b[0] as usize).min(4)] += 1;
@@ -372,6 +482,14 @@ impl Scanner {
                             .unwrap_or(&[])
                             .trim_ascii();
                         self.clock.matchdate = Some((self.t_ms, cut(line, CLOCK_STR_LEN)));
+                    }
+                }
+                if self.matchkey_open.is_some() {
+                    self.matchkey_part(text);
+                } else if self.clock.matchkey.is_none() {
+                    if let Some(rest) = text.strip_prefix(b"matchkey:") {
+                        self.matchkey_open = Some((self.t_ms, Vec::new()));
+                        self.matchkey_part(rest);
                     }
                 }
             }
@@ -448,11 +566,18 @@ impl Scanner {
                         }
                     }
                 }
-                self.roster.insert(slot, (uid, s));
+                self.player(
+                    slot,
+                    InfoChange::User {
+                        userid: uid,
+                        info: s,
+                    },
+                );
             }
             42 => {
-                if self.roster_start.is_none() {
-                    self.roster_start = Some(self.roster.clone());
+                if !self.playerinfo_seen {
+                    self.playerinfo_seen = true;
+                    self.players.start = self.players.changes.len();
                 }
             }
             45 | 46 => {
@@ -475,7 +600,18 @@ impl Scanner {
                     i += s.len() + 1;
                 }
             }
-            51 => self.setinfo_updates += 1,
+            51 => {
+                self.setinfo_updates += 1;
+                if let Some((&slot, rest)) = b.split_first() {
+                    let key = str_at(rest);
+                    let value = str_at(rest.get(key.len() + 1..).unwrap_or(&[]));
+                    let c = InfoChange::Set {
+                        key: key.to_vec(),
+                        value: value.to_vec(),
+                    };
+                    self.player(slot, c);
+                }
+            }
             52 => {
                 self.serverinfo_updates += 1;
                 let k = str_at(b);
@@ -558,12 +694,13 @@ impl Scanner {
     }
 
     pub fn finish(mut self) -> Scan {
+        // a `matchkey:` line the demo ends inside
+        self.matchkey_close();
         let digest: [u8; 32] = std::mem::take(&mut self.sha).finalize().into();
         let census = self.census_json();
-        let roster = self
-            .roster_start
-            .clone()
-            .unwrap_or_else(|| self.roster.clone());
+        if !self.playerinfo_seen {
+            self.players.start = self.players.changes.len();
+        }
         let (map, level) = {
             let m = self.modellist.first().cloned().unwrap_or_default();
             (
@@ -583,7 +720,7 @@ impl Scanner {
             serverinfo: self.serverinfo.take().unwrap_or_default(),
             levelname: level,
             map,
-            roster: roster.into_iter().map(|(s, (u, i))| (s, u, i)).collect(),
+            players: std::mem::take(&mut self.players),
             demoinfo: std::mem::take(&mut self.demoinfo),
             census,
             clock: std::mem::take(&mut self.clock),
@@ -674,6 +811,13 @@ impl Scanner {
         }
         if let Some((t, v)) = &self.clock.matchdate {
             j.key("matchdate");
+            j.arr_open();
+            j.num(*t);
+            j.str(v);
+            j.arr_close();
+        }
+        if let Some((t, v)) = &self.clock.matchkey {
+            j.key("matchkey");
             j.arr_open();
             j.num(*t);
             j.str(v);
@@ -775,54 +919,10 @@ pub struct Scan {
     pub serverinfo: Vec<u8>,
     pub levelname: Vec<u8>,
     pub map: Vec<u8>,
-    /// (slot, userid, userinfo) at the first playerinfo (else at the end)
-    pub roster: Vec<(u8, u32, Vec<u8>)>,
+    pub players: PlayerLog,
     pub demoinfo: Vec<u8>,
     pub census: String,
     pub clock: Clock,
-}
-
-/// Whether `b` starts like an MVD demo: `Some(true)` or `Some(false)`
-/// once the start of `b` decides it, `None` while more bytes are needed.
-/// A demo starts with a whole frame that carries messages (a non-empty
-/// `dem_read`/`dem_all`/... payload, or hidden or multi-target data; not a
-/// bare `dem_set`), and either its messages parse or, if that first frame
-/// is damaged, the next 16 frames are whole too. A frame's length field
-/// must fit the input, so other files almost never frame: text, gzip,
-/// PNG, TIFF and random bytes fail on the first frame.
-pub fn mvd_start(b: &[u8]) -> Option<bool> {
-    let bad = |b: &[u8], p: usize| b.len() >= p + 2 && matches!(b[p + 1] & 7, 0 | 7);
-    if b.len() < 2 {
-        return None;
-    }
-    let head = match b[1] & 7 {
-        0 | 2 | 7 => return Some(false),
-        3 => 10,
-        _ => 6,
-    };
-    let n = frame_len(b, 0)?;
-    if n <= head {
-        return Some(false);
-    }
-    let mut s = Scanner::new();
-    s.feed(&b[..n]);
-    if s.escapes == 0 {
-        return Some(true);
-    }
-    let mut p = n;
-    for _ in 0..16 {
-        if bad(b, p) {
-            return Some(false);
-        }
-        p += frame_len(b, p)?;
-    }
-    Some(true)
-}
-
-/// `mvd_start` of a whole input: a start that is not decided by the end of
-/// the input is not a demo.
-pub fn starts_like_mvd(b: &[u8]) -> bool {
-    mvd_start(b) == Some(true)
 }
 
 pub fn scan(b: &[u8]) -> Scan {
@@ -948,7 +1048,7 @@ pub fn demoinfo_json(raw: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// The value of a hidden 0x000B block (mvdhidden_demo_start_timestamp_ms,
-/// FORMAT.md §3 tag 11). Current mvdsv writes a ULEB128
+/// the demo start timestamp). Current mvdsv writes a ULEB128
 /// (`SV_MVDEmbedStartTimestamp`); earlier builds wrote a fixed 8-byte
 /// little-endian u64. An 8-byte body that the LEB128 does not consume
 /// exactly is the u64; anything else is read as LEB128 (at most 10 bytes,
@@ -979,12 +1079,12 @@ mod tests {
         );
         // the ULEB128 form of current mvdsv
         let mut b = Vec::new();
-        crate::util::put_uv(&mut b, 1778675998090);
+        mvdz::util::put_uv(&mut b, 1778675998090);
         assert_eq!(b.len(), 6);
         assert_eq!(super::demo_start_ms(&b), 1778675998090);
         // an 8-byte LEB128 is read as LEB128
         let mut b = Vec::new();
-        crate::util::put_uv(&mut b, 1 << 50);
+        mvdz::util::put_uv(&mut b, 1 << 50);
         assert_eq!(b.len(), 8);
         assert_eq!(super::demo_start_ms(&b), 1 << 50);
     }

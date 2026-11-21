@@ -2,7 +2,7 @@
 //!
 //! [`StreamEncoder`] compresses a demo that is still growing: it cuts a
 //! segment whenever enough whole frames have arrived, checks it, and
-//! writes it at once. The metadata (identity, census, demoinfo) is known
+//! writes it at once. The metadata (identity, timing, demoinfo) is known
 //! only at the end, so it follows the segments and the trailer points at
 //! it. A segment that shares KTX demoinfo, and every segment after it, is
 //! held back (coded) and written after the metadata, so a sequential
@@ -19,7 +19,7 @@ use crate::decode::{
 use crate::encode::{Config, check_config, raw_body, transform_body, walk_one};
 use crate::error::{Error, Result, bad};
 use crate::format::*;
-use crate::meta::Scanner;
+use crate::ident::Ident;
 use crate::proto::{Proto, frame_len};
 use crate::segment::{DEFAULT_SEGMENT, frame_scan};
 use crate::util::{Crc, usz};
@@ -35,7 +35,7 @@ pub struct StreamEncoder<W: Write> {
     /// bytes of `pending` that are whole frames already scanned
     framed: usize,
     proto: Proto,
-    scan: Scanner,
+    scan: Ident,
     dinfo: Vec<u8>,
     /// the start of the demo passed the input check
     started: bool,
@@ -68,7 +68,7 @@ impl<W: Write> StreamEncoder<W> {
             pending: Vec::new(),
             framed: 0,
             proto: Proto::default(),
-            scan: Scanner::new(),
+            scan: Ident::default(),
             dinfo: Vec::new(),
             started: false,
             hold: false,
@@ -126,7 +126,7 @@ impl<W: Write> StreamEncoder<W> {
                 if crate::api::is_gzip(&s.pending) {
                     crate::api::check_demo(&s.pending)?;
                 }
-                match crate::meta::mvd_start(&s.pending) {
+                match crate::ident::mvd_start(&s.pending) {
                     None => return Ok(()),
                     Some(false) => crate::api::check_demo(&s.pending)?,
                     Some(true) => s.started = true,
@@ -221,7 +221,7 @@ impl<W: Write> StreamEncoder<W> {
         Ok(())
     }
 
-    /// Sets an extension metadata key (FORMAT.md §3, tag 10), replacing
+    /// Sets an extension metadata key (FORMAT.md §3, tag 5), replacing
     /// its value if the key is set already. The metadata is written by
     /// `finish`, so this may be called at any time before it. A key the
     /// metadata cannot take (all keys and values over 1 MiB) is an error
@@ -251,8 +251,8 @@ impl<W: Write> StreamEncoder<W> {
                 let seg = std::mem::take(&mut s.pending);
                 s.segment(&seg)?;
             }
-            let scan = std::mem::take(&mut s.scan).finish();
-            let mut md = Metadata::from_scan(scan, std::mem::take(&mut s.cfg.ext));
+            let id = std::mem::take(&mut s.scan);
+            let mut md = Metadata::new(id, std::mem::take(&mut s.cfg.ext));
             md.demoinfo = std::mem::take(&mut s.dinfo);
             let meta_off = s.put(K_META, &md.encode_for(s.cfg.level)?)?;
             for (b, e) in std::mem::take(&mut s.held) {

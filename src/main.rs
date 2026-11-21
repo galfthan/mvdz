@@ -26,8 +26,8 @@ fn usage() -> ! {
   mvdz decompress [-j threads] [--max-memory size] [--trusted] [--gzip | --no-gzip]
                   [-f] [--rm] files... | in.mvdz out | -o out in.mvdz
                   game.mvdz -> game.mvd (game.mvd.gz with --gzip) beside it
-  mvdz info       file.mvdz...                     metadata and index as JSON
-  mvdz census     [--tsv] files-or-dirs...         census of .mvdz / .mvd / .mvd.gz files
+  mvdz info       file.mvdz...                     identity, timing and index as JSON
+                  (what a demo contains: the separate mvdz-meta tool)
   mvdz bench      [--levels normal,fast] [-s size] [-r reps] [-j threads] [--no-verify]
                   [--skip-compress] [--trusted] [--files out.tsv] [--streams out.tsv] files...
 '-' as a file name is standard input or output. compress and decompress name
@@ -60,7 +60,6 @@ struct Args {
     files: Vec<String>,
     no_verify: bool,
     ext: Vec<(String, Vec<u8>)>,
-    tsv: bool,
     skip_compress: bool,
     trusted: bool,
     gzip: Option<bool>,
@@ -104,7 +103,6 @@ fn parse(args: &[String]) -> Args {
         files: Vec::new(),
         no_verify: false,
         ext: Vec::new(),
-        tsv: false,
         skip_compress: false,
         trusted: false,
         gzip: None,
@@ -139,7 +137,6 @@ fn parse(args: &[String]) -> Args {
             "--streams" => a.streams = Some(val()),
             "--files" => a.perfile = Some(val()),
             "--no-verify" => a.no_verify = true,
-            "--tsv" => a.tsv = true,
             "--skip-compress" => a.skip_compress = true,
             "--trusted" => a.trusted = true,
             "--gzip" => a.gzip = Some(true),
@@ -410,7 +407,6 @@ fn main() {
         "decompress" | "d" => run_jobs(&a, false),
         "bench" => bench(&a),
         "info" => info(&a),
-        "census" => census(&a),
         _ => usage(),
     }
 }
@@ -592,107 +588,6 @@ fn info(a: &Args) {
         match api::read_metadata(std::io::BufReader::new(r)) {
             Ok(fi) => out!("{}", fi.to_json()),
             Err(e) => die(format!("{f}: {e}")),
-        }
-    }
-}
-
-/// Census over many files: .mvdz (read from the metadata) or raw .mvd
-/// (scanned). One JSON object per line, or a TSV of the main counts.
-fn census(a: &Args) {
-    let mut files = Vec::new();
-    for f in &a.files {
-        let p = std::path::Path::new(f);
-        if p.is_dir() {
-            let mut v: Vec<_> = std::fs::read_dir(p)
-                .unwrap_or_else(|e| die(e))
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .collect();
-            v.sort();
-            files.extend(v);
-        } else {
-            files.push(p.to_path_buf());
-        }
-    }
-    // names and values come from the files: printed escaped, so a file
-    // cannot inject terminal escapes, columns or rows
-    let esc = |s: &str| s.escape_debug().to_string();
-    if a.tsv {
-        out!(
-            "file\tsha256\tsize\tframes\tduration_ms\tmap\tprotocol_ext\tescapes\ttruncated\tdemoinfo\tcensus_bytes"
-        );
-    }
-    for p in files {
-        let name = p
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let m = if name.ends_with(".mvdz") {
-            let Ok(r) = std::fs::File::open(&p) else {
-                continue;
-            };
-            match api::read_metadata(std::io::BufReader::new(r)) {
-                Ok(fi) => fi.meta,
-                Err(e) => {
-                    eprintln!("{name}: {e}");
-                    continue;
-                }
-            }
-        } else if name.ends_with(".mvd") || name.ends_with(".mvd.gz") {
-            let Ok(mut b) = std::fs::read(&p) else {
-                continue;
-            };
-            if mvdz::is_gzip(&b) {
-                match mvdz::gunzip(&b, Limits::default().memory) {
-                    Ok(d) => b = d,
-                    Err(e) => {
-                        eprintln!("{name}: {e}");
-                        continue;
-                    }
-                }
-            }
-            let s = mvdz::meta::scan(&b);
-            // the demoinfo the scan found (an .mvdz has it in its metadata)
-            let demoinfo = s.demoinfo.clone();
-            let mut m = mvdz::Metadata::from_scan(s, Vec::new());
-            m.demoinfo = demoinfo;
-            m
-        } else {
-            continue;
-        };
-        let census: serde_json::Value =
-            serde_json::from_str(&m.census).unwrap_or(serde_json::Value::Null);
-        if a.tsv {
-            let g = |path: &[&str]| -> String {
-                let mut v = &census;
-                for k in path {
-                    v = &v[*k];
-                }
-                match v {
-                    serde_json::Value::String(s) => esc(s),
-                    serde_json::Value::Null => String::new(),
-                    x => x.to_string(),
-                }
-            };
-            out!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}/{}/{}\t{}\t{}\t{}\t{}",
-                esc(&name),
-                api::hex(&m.sha256),
-                m.size,
-                m.frames,
-                m.duration_ms,
-                esc(&m.map.iter().map(|&c| c as char).collect::<String>()),
-                g(&["serverdata", "fte_pext"]),
-                g(&["serverdata", "fte_pext2"]),
-                g(&["serverdata", "mvd_pext"]),
-                g(&["raw_path", "escapes"]),
-                g(&["truncated"]),
-                !m.demoinfo.is_empty(),
-                m.census.len()
-            );
-        } else {
-            let j = serde_json::json!({"file": name, "sha256": api::hex(&m.sha256), "demoinfo": !m.demoinfo.is_empty(), "census": census});
-            out!("{j}");
         }
     }
 }

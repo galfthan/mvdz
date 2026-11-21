@@ -11,7 +11,10 @@ documentation = "https://github.com/galfthan/mvdz"
 readme = "README.md"
 keywords = ["quakeworld", "mvd", "demo", "compression", "rans"]
 categories = ["compression", "game-development", "command-line-utilities"]
-exclude = ["/fuzz", "/interop", "/scripts", "/.github"]
+exclude = ["/fuzz", "/interop", "/scripts", "/.github", "/meta"]
+
+[workspace]
+members = [".", "meta"]
 
 [lib]
 crate-type = ["rlib", "staticlib", "cdylib"]
@@ -61,11 +64,11 @@ mimalloc = ["dep:mimalloc"]
 # wasm32 and other targets
 scalar = []
 
-# Style lints the code deliberately does not follow: the C ABI's safety
+# Style lints the code deliberately does not follow (both packages): the C ABI's safety
 # contract is documented once, in include/mvdz.h; the hot loops (walker,
 # rANS, numeric groups, CRC) index several parallel arrays and keep their
 # written form, which was benchmarked.
-[lints.clippy]
+[workspace.lints.clippy]
 missing_safety_doc = "allow"
 needless_range_loop = "allow"
 collapsible_if = "allow"
@@ -76,3 +79,6 @@ len_without_is_empty = "allow"
 precedence = "allow"
 manual_div_ceil = "allow"
 chunks_exact_to_as_chunks = "allow"
+
+[lints]
+workspace = true

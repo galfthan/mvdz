@@ -18,9 +18,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - run: cargo fmt --check
+      - run: cargo fmt --all --check
       - run: cd fuzz && cargo fmt --check
-      - run: cargo clippy --profile fast --all-targets -- -D warnings
+      - run: cargo clippy --profile fast --workspace --all-targets -- -D warnings
       - run: cargo clippy --profile fast --features pure-zstd --lib -- -D warnings
 
   test:
@@ -35,8 +35,8 @@ jobs:
           cache-dependency-path: interop/specdec/go.sum
       # includes the C example (tests/c_api.rs) and the Go decoder over
       # the vectors; tests that need real demos skip without MVDZ_TEST_DATA
-      - run: cargo test --profile fast
-      - run: cargo test --profile fast --features pure-zstd
+      - run: cargo test --profile fast --workspace
+      - run: cargo test --profile fast --workspace --features mvdz/pure-zstd
 
   wasm-msrv:
     runs-on: ubuntu-latest
@@ -47,4 +47,4 @@ jobs:
           targets: wasm32-unknown-unknown
       - run: cargo build --lib --target wasm32-unknown-unknown
       - uses: dtolnay/rust-toolchain@1.89
-      - run: cargo +1.89 build --locked --all-targets
+      - run: cargo +1.89 build --locked --workspace --all-targets

@@ -20,7 +20,7 @@ pub mod decode;
 pub mod encode;
 pub mod error;
 pub mod format;
-pub mod meta;
+pub mod ident;
 pub mod numeric;
 pub mod proto;
 #[cfg(all(feature = "sampler", target_os = "linux", target_arch = "x86_64"))]
