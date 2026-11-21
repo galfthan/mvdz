@@ -25,10 +25,17 @@ fn c_example_builds_and_runs() {
         return;
     }
     // the static library of this crate, in the profile this test was built
-    // with: the test binary is target/<profile>/deps/c_api-*, so its
-    // grandparent is the profile directory (whatever CARGO_TARGET_DIR is)
+    // with. The test binary is target/<profile>/deps/c_api-* up to cargo
+    // 1.99 and target/<profile>/build/<pkg>/<hash>/out/c_api-* from 1.100,
+    // so the profile directory is the parent of the nearest `deps` or
+    // `build` ancestor (whatever CARGO_TARGET_DIR is)
     let me = std::env::current_exe().unwrap();
-    let pdir = me.parent().and_then(|d| d.parent()).unwrap().to_path_buf();
+    let pdir = me
+        .ancestors()
+        .find(|d| d.file_name().is_some_and(|n| n == "deps" || n == "build"))
+        .and_then(|d| d.parent())
+        .expect("test binary is not under a cargo profile directory")
+        .to_path_buf();
     let pname = pdir.file_name().unwrap().to_string_lossy().to_string();
     let profile = if pname == "debug" {
         "dev".to_string()
