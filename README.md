@@ -6,7 +6,7 @@ the demo's gzip, decodes back to the exact original bytes (checked by
 SHA-256), can be read sequentially from a pipe or seeked by demo time, and
 carries the demo's metadata (identity hash, server info, roster, a census
 of its contents, wall-clock time) so catalogues can read it without
-decoding. Files can also carry attachments stored beside the demo.
+decoding.
 
 It comes as a command-line tool, a Rust library, a C library (static or
 shared, for engines such as ezQuake and FTE) and builds for WebAssembly.
@@ -19,9 +19,7 @@ in Go, written from the specification as a conformance check, and
 may still change before 1.0: files written by a release candidate are not
 guaranteed to be readable by 1.0, so keep the original `.mvd` files for
 now. Later additions after 1.0 will use the forward-compatible extension
-points of FORMAT.md. A Go library is planned. Media attachments (voice,
-commentary, transcripts) are
-[proposed for version 2, open for discussion](proposals/media-attachments.md).
+points of FORMAT.md. A Go library is planned.
 
 How it works: the demo is walked command by command (`svc_*` layouts from
 mvdsv and ezQuake). Every field goes to its own stream; numeric fields
@@ -152,13 +150,8 @@ mvdz compress   [--fast] [-s size] [-j threads] [--ext key=value]... [--allow-no
                 [-f] [--rm] files... | in out.mvdz | -o out.mvdz in
 mvdz decompress [-j threads] [--max-memory size] [--trusted] [--gzip | --no-gzip]
                 [-f] [--rm] files... | in.mvdz out | -o out in.mvdz
-mvdz info       file.mvdz...                 metadata, index, attachments as JSON
+mvdz info       file.mvdz...                 metadata and index as JSON
 mvdz census     [--tsv] files-or-dirs...     census of .mvdz / .mvd / .mvd.gz files
-mvdz attach add file.mvdz name path [--mime type] [--meta key=value]...
-mvdz attach ls  file.mvdz [name-prefix]
-mvdz attach extract file.mvdz name out
-mvdz attach rm  file.mvdz name...
-mvdz attach export in.mvdz out.mvdz [--keep name]... [--keep-prefix p]... [--drop name]... [--drop-prefix p]...
 mvdz bench      [--levels normal,fast] [-s size] [-r reps] [-j threads] [--trusted] files...
 ```
 
@@ -178,24 +171,14 @@ decoding at a small cost in size. The default is 256 KiB, and `-s 0` keeps
 the whole demo in one segment (a file holds at most 65536 segments, so the
 default covers demos up to about 16 GiB). Compression decodes its own output and compares before writing
 anything. `--trusted` skips the SHA-256 identity check (see above); use it
-only for files whose identity you verified before. `attach add` stores the
-file as given; `--mime` defaults to `application/octet-stream`; `--meta`
-adds a key/value, whose key needs a prefix (`x-...` or `vendor.`):
-unprefixed keys are reserved for future versions (FORMAT.md §10.1).
-`attach export` writes a copy that keeps the attachments matching a
-`--keep` name or `--keep-prefix` (all, if none is given) and no `--drop`
-name or `--drop-prefix`, e.g. a demo download without large recordings;
-the source is not changed, and the output's bundle hash goes to standard
-error. `info` prints the JSON described in FORMAT.md §3.2, including
-`bundle_sha256` (§10.2).
+only for files whose identity you verified before. `info` prints the JSON
+described in FORMAT.md §3.2.
 
 ```
 mvdz compress game.mvd
 mvdz compress --fast -s 1M -o game.fast.mvdz game.mvd
 mvdz decompress --gzip demos/*.mvdz
 mvdz info game.mvdz | jq .map
-mvdz attach add game.mvdz analysis/result.json result.json --mime application/json --meta x-tool=mvda
-mvdz attach export game.mvdz - --drop-prefix rec/ > download.mvdz
 ```
 
 **gzip.** `compress` takes a raw `.mvd` or a gzip-compressed one
@@ -223,24 +206,15 @@ closes early (`mvdz census demos/ | head`), the tool stops quietly.
 ## Hashes and trust
 
 * **Identity**: the SHA-256 of the original `.mvd` (the hub's
-  `demo_sha256`), stored in the metadata. The same for every level,
-  segment size and set of attachments. Reading the metadata does not
+  `demo_sha256`), stored in the metadata. The same for every level and
+  segment size. Reading the metadata does not
   verify it; a full decode does (by default).
 * **Integrity**: CRC-32C per segment and over the whole demo, always
   checked, also when seeking. `--trusted` decodes with these alone.
-* **Bundle**: `bundle_sha256`, a SHA-256 over the identity and the
-  attachments' names, MIME types, SHA-256s and keys; the same however the
-  file was compressed. A download ETag, and what a signature would sign.
 
 Files from elsewhere are untrusted input: decoders bound memory and work
-(`Limits`, `max_memory`), demos can carry console commands
-(`svc_stufftext`) that players must filter, and attachments are untrusted
-content of any type, not access-controlled: anyone holding a file can read
-all of them. FORMAT.md §14 covers this.
-
-**Media attachments** (voice, commentary, transcripts, their timing and a
-privacy convention) are not part of version 1: they are
-[proposed for version 2, open for discussion](proposals/media-attachments.md).
+(`Limits`, `max_memory`), and demos can carry console commands
+(`svc_stufftext`) that players must filter. FORMAT.md §13 covers this.
 
 ## Rust
 
@@ -248,7 +222,7 @@ Not on crates.io yet: depend on it by git
 (`mvdz = { git = "https://github.com/galfthan/mvdz" }`) or by path.
 
 ```rust
-use mvdz::{Attachment, Config, Level, Limits, ReadOptions};
+use mvdz::{Config, Level, Limits, ReadOptions};
 
 // whole buffers
 let packed = mvdz::compress(&demo, &Config::default())?;                   // normal level
@@ -269,25 +243,17 @@ let mut w = mvdz::Writer::new(file, &Config { segment: 1 << 20, ..Default::defau
 w.write_demo(&chunk)?;                    // segments are written as they fill
 w.finish()?;                              // metadata, index, trailer (or w.abort())
 
-// metadata without decoding (identity not verified); attachments
+// metadata without decoding (identity not verified)
 let info = mvdz::read_metadata(std::fs::File::open("game.mvdz")?)?;
-println!("{} {}", info.to_json(), mvdz::api::hex(&info.bundle_hash()));
-for a in mvdz::list_attachments(std::fs::File::open("game.mvdz")?, "analysis/")? { println!("{} {}", a.name, a.size); }
-let result = mvdz::read_attachment(std::fs::File::open("game.mvdz")?, "analysis/result.json")?;
-let a = Attachment { name: "analysis/result.json".into(), mime: "application/json".into(),
-                     kv: vec![("x-tool".into(), "mvda".into())], data: json_bytes };
-mvdz::update_attachments(std::path::Path::new("game.mvdz"), &["old"], &[a])?;
-// a copy without some attachments, e.g. for a download
-let sel = mvdz::Selection { drop_prefix: vec!["rec/".into()], ..Default::default() };
-let etag = mvdz::export_attachments(std::fs::File::open("game.mvdz")?, std::fs::File::create("dl.mvdz")?, |e| sel.matches(e))?;
+println!("{}", info.to_json());
 ```
 
 `ReadOptions` (for decoding) holds `limits` and `trusted`; `Limits` has
 `memory` (bytes, default 1 GiB on 64-bit) and `work_per_byte`, and is all
-that metadata and attachment reading take. Errors (`mvdz::Error`) are `Format` (not MVDZ or an
+that metadata reading takes. Errors (`mvdz::Error`) are `Format` (not MVDZ or an
 unsupported version), `Corrupt` (any rule of FORMAT.md), `Limit` (the
 budget), `Invalid` (a bad argument, a configuration a reader would
-refuse), `NotFound`, `Io` and `Internal`. Decoders never panic on corrupt
+refuse), `Io` and `Internal`. Decoders never panic on corrupt
 input; they return an error. Every size a file declares is bounded by the
 bytes actually present (FORMAT.md §9), and `Limits` caps the memory one
 decode may use.
@@ -330,9 +296,6 @@ normally (no `longjmp`) and must not call back into their own handle.
 fills, about 0.15 s per MiB at the normal level (0.08 s at the fast
 level): a server should feed the writer from a recording thread, not
 from its frame loop.
-Attachments are listed in the JSON of `mvdz_info_json`, read with
-`mvdz_attachment_read` (which needs both read and seek callbacks), and
-filtered into a copy with `mvdz_attachments_export`.
 `examples/c/example.c` shows every call; the test `tests/c_api.rs`
 compiles and runs it.
 
@@ -351,7 +314,7 @@ reads them. The format's resource rules bound memory by the input, and
 hostile files through every reader including the C interface, and through
 the Go conformance decoder when Go is installed), round trips at both
 levels, segmented and streamed, corrupt-input and hostile-file tests,
-metadata and attachment tests, and the regressions of the pre-release
+metadata tests, and the regressions of the pre-release
 reviews. `cargo test --features pure-zstd` runs them with the pure-Rust
 zstd decoder. Everything runs on synthetic demos; tests that can also use
 real demos read them from the directory in `MVDZ_TEST_DATA` (subdirectory
@@ -359,7 +322,7 @@ real demos read them from the directory in `MVDZ_TEST_DATA` (subdirectory
 `poc/` with hostile model headers) and say so when it is unset.
 `MVDZ_WRITE_VECTORS=1` regenerates the vectors (it needs the sample
 demos they were made from). Fuzz targets are in `fuzz/` (`cargo +nightly
-fuzz run decode`; also `stream_reader`, `read_metadata`, `attachments`,
+fuzz run decode`; also `stream_reader`, `read_metadata`,
 `stream_writer`, `capi`, `compress_rt` and the structure-aware `gen_rt`).
 The feature `scalar` forces the portable code paths (as on wasm).
 
@@ -372,7 +335,7 @@ than zstd -19 and 2.2 times smaller than xz ([BENCHMARKS.md](BENCHMARKS.md)).
 A general-purpose compressor sees bytes; mvdz parses the demo, puts each
 field in its own stream and codes positions and angles as residuals
 against predictions. The container also gives seeking by demo time,
-metadata without decoding, the demo's identity hash and attachments.
+metadata without decoding and the demo's identity hash.
 
 **What is the licence?** MIT ([LICENSE](LICENSE)), and every dependency is
 permissive (MIT, Apache-2.0 or BSD). MIT code can be linked into GPL
@@ -385,8 +348,7 @@ files. After 1.0, later additions will use the forward-compatible
 extension points of FORMAT.md (new sections, metadata tags and keys).
 
 **Where do I give feedback?** Open an issue on GitHub
-(<https://github.com/galfthan/mvdz/issues>), for the release, the format
-and the [media attachments proposal](proposals/media-attachments.md)
+(<https://github.com/galfthan/mvdz/issues>), for the release and the format
 alike.
 
 ## Contributing

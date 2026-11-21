@@ -5,7 +5,7 @@ still change before 1.0: files written by a release candidate are not
 guaranteed to be readable by 1.0. The version byte stays 1.
 
 This document specifies the MVDZ format precisely enough to write an
-independent decoder (and, with §12 and Appendix A, an encoder whose files
+independent decoder (and, with §11 and Appendix A, an encoder whose files
 the reference accepts). The reference implementation is the Rust crate in
 this repository; sections cite the source functions they describe
 (`file:function`) so a porter can cross-check. Test vectors are in
@@ -16,17 +16,17 @@ hostile vector; another decoder must refuse the file, and should report
 the same category (§9, "Errors"), but its message text is its own.
 
 An MVDZ file holds one QuakeWorld MVD demo, losslessly: a section container
-(metadata, a seek index, attachments, a trailer) whose segments carry the
+(metadata, a seek index, a trailer) whose segments carry the
 demo, each either transformed (a structural walk of the demo's frames and
 `svc_*` commands into streams, numeric fields coded as residuals against
 predictors, every stream entropy-coded) or stored as zstd or raw bytes.
 
-**Identity, integrity, bundle.** Three different hashes, for three jobs:
+**Identity and integrity.** Two different checks, for two jobs:
 
 * *Identity*: a demo is identified by the SHA-256 of the original `.mvd`
   bytes (the hub's `demo_sha256`), never by a hash of the `.mvdz` file: the
-  `.mvdz` bytes change when attachments are added, with the segment size or
-  the level, and between encoder versions. The metadata stores this hash
+  `.mvdz` bytes change with the segment size or the level, and between
+  encoder versions. The metadata stores this hash
   (§3, tag 1); a full decode recomputes and checks it, by default.
 * *Integrity*: a CRC-32C of every segment's decoded bytes (§5.1) and of the
   whole demo (§4) detects damage (bit rot, truncation, a bad copy), also
@@ -34,18 +34,12 @@ predictors, every stream entropy-coded) or stored as zstd or raw bytes.
   trusts its input (a cache that verified the SHA-256 once, at ingest) may
   skip the SHA-256 and rely on the CRCs alone (the reference's *trusted*
   option); it then detects damage but not a deliberately forged file
-  (§14).
-* *Bundle*: a SHA-256 over the identity and the attachments' names, MIME
-  types, SHA-256s and keys (§10.2), the same however the file is
-  compressed: a download ETag and a basis for signatures.
+  (§13).
 
 **Versions.** The byte after the magic is the format version, here 1. A
 reader refuses any other version. Compatible additions do not change it:
-they use new section kinds (§2.2), metadata tags (§3), attachment keys
-(§10.1) or segment codings and back ends that old readers refuse cleanly.
-A new non-critical section that must survive attachment edits belongs in
-the demo part: sections in the attachment part are dropped when the
-attachment set changes (§10, Updating).
+they use new section kinds (§2.2), metadata tags (§3) or segment codings
+and back ends that old readers refuse cleanly.
 Nothing was released before version 1.
 
 ---------------------------------------------------------------------------
@@ -81,7 +75,7 @@ Nothing was released before version 1.
   always satisfies it.)
 * **Integer arithmetic.** Unless stated, values are as wide as their type
   and arithmetic wraps modulo 2^bits where it says "wrapping"; elsewhere it
-  cannot overflow for valid input (§13 lists the places where it could
+  cannot overflow for valid input (§12 lists the places where it could
   for invalid input, and what the reference does). `i16(x)` reinterprets
   the low 16 bits as signed; `x as u16` keeps the low 16 bits; a signed
   right shift is arithmetic; integer division truncates toward zero, and
@@ -116,7 +110,7 @@ section := kind u8 | len u64le | body[len]
 
 * Bytes 0-3: `MVDZ`. Byte 4: the version, 1.
 * Byte 5, `flags`: bit 0 = the file was written by the streaming encoder
-  (§11; its metadata is near the end). Other bits are 0 when written;
+  (§10; its metadata is near the end). Other bits are 0 when written;
   readers ignore them.
 * Bytes 6-7: 0 when written; readers ignore them.
 * `meta_off`: file offset of the META section, or 0 (then the trailer's
@@ -143,40 +137,31 @@ not know, without reading its body.
 | 0x01 | META | no | metadata (§3) | one |
 | 0x82 | SEGMENT | yes | one segment of the demo (§5) | any |
 | 0x03 | INDEX | no | whole-demo size, CRC and duration; the segments (§4) | one |
-| 0x04 | ATTACH | no | one attachment's stored bytes (§10) | any |
-| 0x05 | ADIR | no | the attachment directory (§10) | one |
 | 0x86 | TABLES | yes | rANS models shared by the segments (§2.6) | one |
-| 0x7F | TRAILER | no | offsets of INDEX, META, ADIR; end of the demo part (§2.3) | one, last |
+| 0x7F | TRAILER | no | offsets of INDEX and META (§2.3) | one, last |
 
-**Order.** A file has two parts:
+Kinds 0x04 and 0x05 were used by release candidates and must not be
+reassigned; a reader treats them as unknown non-critical sections.
 
-* the *demo part*: META, the SEGMENT sections in demo order, then INDEX
-  (META may come before, between or after segments; §5.3 says when it must
-  come first); a TABLES section, if any, comes before every SEGMENT;
-* the *attachment part*, from the first ATTACH or ADIR section on: ATTACH
-  sections, then the ADIR.
-
-Then the TRAILER. Unknown non-critical sections may appear anywhere before
-the trailer (those in the attachment part do not survive a change of the
-attachments, §10). Every one of these is an error: a second META, INDEX,
-ADIR or TABLES; a SEGMENT after the INDEX; a TABLES after a SEGMENT or the
-INDEX; a META, SEGMENT, INDEX or TABLES in the attachment part; an ATTACH
-after the ADIR; ATTACH sections without an ADIR; a TRAILER that
-is not the last 49 bytes of the file; any byte after the trailer.
+**Order.** META, the SEGMENT sections in demo order and INDEX (META may
+come before, between or after segments; §5.3 says when it must come
+first; the INDEX follows the last segment). A TABLES section, if any,
+comes before every SEGMENT. Then the TRAILER. Unknown non-critical sections
+may appear anywhere before the trailer. Every one of these is an error: a
+second META, INDEX or TABLES; a SEGMENT after the INDEX; a TABLES after a
+SEGMENT or the INDEX; a TRAILER that is not the last 33 bytes of the file;
+any byte after the trailer.
 
 ### 2.3 Trailer
 
 ```
-0x7F | len = 40 (u64le) | index_off u64le | meta_off u64le | adir_off u64le | body_end u64le | "MVDZTRL1"
+0x7F | len = 24 (u64le) | index_off u64le | meta_off u64le | "MVDZTRL1"
 ```
 
-The last 49 bytes of a complete file. Offsets are file offsets of section
+The last 33 bytes of a complete file. Offsets are file offsets of section
 headers. The trailer must agree with the sections (§9): `index_off` is the
-INDEX section, `meta_off` the META section, `adir_off` the ADIR section or
-0 if there is none, and `body_end` the offset of the first ATTACH or ADIR
-section, or the trailer's own offset if there is none. A section of kind
-0x7F whose length is not 40, or whose last 8 bytes are not `MVDZTRL1`, is
-an error.
+INDEX section and `meta_off` the META section. A section of kind 0x7F whose
+length is not 24, or whose last 8 bytes are not `MVDZTRL1`, is an error.
 
 ### 2.4 Complete and incomplete files
 
@@ -184,7 +169,7 @@ A *complete* file ends with its trailer and has exactly one META and one
 INDEX. A file whose sections end without a trailer (a recording that was
 interrupted, a cut download) is *incomplete*: every reader refuses it as a
 whole ("incomplete file (no trailer)"), but a sequential reader first
-delivers the bytes of every complete segment before that point (§11.2), so
+delivers the bytes of every complete segment before that point (§10.2), so
 a recorder's crash loses only the tail.
 
 ### 2.5 Layouts written by the reference encoder
@@ -193,13 +178,11 @@ A reader must not depend on these beyond the rules above.
 
 * One shot (`encode.rs:compress`): `prefix (meta_off = 16) | META |
   [TABLES] | SEGMENT* | INDEX | TRAILER`. TABLES only in a file of more
-  than one segment at the normal level (§12 rule 11).
-* Streaming (`stream.rs:StreamEncoder`, §11): `prefix (flags = 1,
+  than one segment at the normal level (§11 rule 11).
+* Streaming (`stream.rs:StreamEncoder`, §10): `prefix (flags = 1,
   meta_off = 0) | SEGMENT* | META | SEGMENT* | INDEX | TRAILER`. The
   segments that share KTX demoinfo (§5.3) and all segments after the first
   of them follow the META.
-* Attachments (`api.rs:update_attachments_bytes`): the demo part, copied
-  byte for byte, then `ATTACH* | ADIR | TRAILER`.
 * The streaming encoder never writes TABLES.
 
 ### 2.6 TABLES (`rans.rs:FileTables`)
@@ -220,7 +203,7 @@ TABLES body := n uv | n x { sid uv | len uv | model[len] }
   read with the same rules (alphabet 256 for a structural stream, 65 for a
   numeric one; consumed exactly; M2 with the header's length), except
   that M1 has no stream count here: `n <= 65535`.
-* Every reader checks these rules when it meets the section (§9 rule 8).
+* Every reader checks these rules when it meets the section (§9 rule 7).
   A decoder builds the models before it decodes a segment that uses one
   (once per file; a reader that seeks to a segment finds TABLES among the
   section headers before the first SEGMENT). They do not change while
@@ -370,7 +353,6 @@ One object per file, keys in this order:
 | `version` | the format version, 1 |
 | `streamed` | prefix flag bit 0 (§2.1) |
 | `file_size` | bytes of the `.mvdz` file |
-| `bundle_sha256` | the bundle hash (§10.2), hex |
 | `sha256`, `size` | tags 1 and 2 (hex; integer) |
 | `duration_ms`, `frames` | tag 8 |
 | `map`, `levelname`, `serverinfo` | tags 6, 5, 4 (Latin-1 strings) |
@@ -380,7 +362,6 @@ One object per file, keys in this order:
 | `census` | tag 9 (an object) or `null` |
 | `clock` | `{start_timestamp_ms: [demo_ms, unix_ms] or null, epoch: [demo_ms, raw] or null, matchdate: [demo_ms, raw] or null, pauses: [[demo_ms, paused_ms]...], pauses_truncated}` (tags 11-14) |
 | `segments` | the INDEX: `[{t_start_ms, raw_offset, raw_len}]` |
-| `attachments` | the ADIR: `[{name, mime, size, stored, sha256, kv: {key: value}}]` |
 
 Integers are JSON numbers (a reader that keeps only 53-bit doubles may lose
 precision above 2^53).
@@ -522,7 +503,7 @@ SEGMENT body := raw_off uv | raw_len uv | t_start uv | crc u32le | coding u8 | c
   bytes.
 * **Ratio limit.** `raw_len <= 1024 x L + 4096`, where L is the length of
   the SEGMENT section body. This bounds every decoder's memory and work by
-  the bytes actually present; the encoder never exceeds it (§12).
+  the bytes actually present; the encoder never exceeds it (§11).
 * `coding`: 0 transform (§5.2), 1 zstd: `coded` is zstd data (§1) of
   `raw_len` bytes, 2 stored: `coded` is the `raw_len` bytes. Any other
   value: format error ("unknown segment coding").
@@ -856,7 +837,7 @@ count(snd.num), te ≤ count(te.type), stl ≤ count(stl.idx), uc ≤
 floor(count(uc) / 12) (a usercmd block codes at least 12 uc symbols);
 pushing beyond capacity is an error. In a valid file these bounds always
 hold (all but the last exactly), so a port may use growable lists (but see
-§13).
+§12).
 
 ### 6.4 Segment walk and frames (`Walker::run`, `Walker::frame`)
 
@@ -1605,7 +1586,7 @@ without them a few kilobytes of header could describe millions of tables.
 A decoder may check M2 after each table (the reference does) and must
 check it at the end. Valid models from the reference encoder use at most
 about 81 decisions per header byte; the encoder never writes a model that
-breaks M1 or M2 (it codes the stream with zstd or store instead, §12).
+breaks M1 or M2 (it codes the stream with zstd or store instead, §11).
 
 Each table is a vector of log-quantised counts `q[s]` (0 = absent). Table 0
 is the **fallback**; tables 1..n are attached to contexts `keys[i]`
@@ -1759,14 +1740,10 @@ and every segment header (one small read each).
    of the transform header (`flags`, `dinfo_off`, `dinfo_len`, §5.2);
    demoinfo shares non-empty, consecutive, inside the store and covering
    it, each flagged segment after the META (§5).
-7. ADIR: grammar, consumed exactly, at most 2^24 bytes, names non-empty
-   and unique, keys unique within an entry, names, MIME types, keys and
-   values UTF-8; one entry per ATTACH section in the same order, with
-   equal offset and `stored` length (§10).
-8. TABLES: at most 2^24 bytes, grammar, ids, consumed exactly, and every
+7. TABLES: at most 2^24 bytes, grammar, ids, consumed exactly, and every
    model header's rules (alphabet, M1, M2, consumed exactly; §2.6, §8.3).
    Checking them needs no decoder model: a reader that decodes no
-   segment (metadata, attachments) need not build one.
+   segment (metadata) need not build one.
 
 **Content rules** (a full decode): every check of §5.5 (including the
 rest of each transform header, §5.2) and §8.
@@ -1777,8 +1754,7 @@ decoder should report alike (the reference's `Error` kinds, the C codes
 
 * *format* (`MVDZ_E_FORMAT`): not an MVDZ file, an unsupported version of
   the file or of the META, an unknown META codec, an unknown critical
-  section, an unknown segment coding, an unknown attachment codec (when
-  that attachment is read);
+  section, an unknown segment coding;
 * *limit* (`MVDZ_E_LIMIT`): the file is valid but needs more than the
   reader's budget, or a size that does not fit the reader's address space;
 * *corrupt* (`MVDZ_E_CORRUPT`): every other rule of this document.
@@ -1786,7 +1762,7 @@ decoder should report alike (the reference's `Error` kinds, the C codes
 When a file breaks several rules, which one is reported depends on the
 order of the checks. The reference checks sections in file order, each
 section's own rules (header, then body) when it is met, then the
-cross-checks of the trailer (rule 3, the INDEX and ADIR agreement), then,
+cross-checks of the trailer (rule 3, the INDEX agreement), then,
 when decoding, the content rules segment by segment and the whole-demo
 checks; the hostile vectors each break one rule only.
 
@@ -1796,13 +1772,12 @@ checks; the hostile vectors each break one rule only.
 |---|---|---|
 | segment raw length | 0xFFFF0000 | §5.1 |
 | segment ratio | `raw_len <= 1024 x section length + 4096` | §5.1 |
-| attachment ratio (zstd codec) | `size <= 1024 x stored + 4096` | §10 |
 | stream count, stream table | `nstreams <= 384`, `count <= raw_len + 16` | §5.2 |
 | numeric zstd body | at most `5 x count` bytes | §8.2 |
 | model tables (M1) | `n <= min(65535, count)`; in TABLES `n <= 65535` | §8.3, §2.6 |
 | model decisions (M2) | `<= 128 x header length + 1024` | §8.3 |
 | META fields | 2^24 bytes | §3 |
-| INDEX, ADIR, TABLES sections | 2^24 bytes | §4, §10, §2.6 |
+| INDEX, TABLES sections | 2^24 bytes | §4, §2.6 |
 | roster | 256 entries | §3 |
 | META ratio | `raw_len <= 1024 x L + 4096` (L: META body length) | §3 |
 | rANS model header | consumed exactly | §8.3 |
@@ -1815,150 +1790,22 @@ decoder may apply its own budget (the reference's `Limits`: memory 1 GiB
 on 64-bit targets by default, and work), and refuse a file that needs more
 with a limit error (not a format error). The reference charges to that
 budget everything it holds: section bodies while it parses them, the
-metadata, index and directory it keeps, a fixed amount per SEGMENT and
-ATTACH section it records (so a long stream of empty sections cannot grow
+metadata and index it keeps, a fixed amount per SEGMENT section it
+records (so a long stream of empty sections cannot grow
 a sequential reader without bound), model tables and output. Duplicate
-checks (META extension keys, ADIR names and keys) must not be quadratic: a
-directory of 2^24 bytes can hold millions of keys. A decoder must never
+checks (META extension keys) must not be quadratic: a META of 2^24 bytes
+can hold millions of keys. A decoder must never
 abort the process on a declared size.
 
 **What is not checked.** Census content; roster, serverinfo, levelname
-and map against the demo; attachment content (checked only when an
-attachment is read: length, decompression, SHA-256). A reader that does
-not decode the demo does not verify the identity (§14).
+and map against the demo. A reader that does
+not decode the demo does not verify the identity (§13).
 
 ---------------------------------------------------------------------------
 
-## 10. Attachments
+## 10. Streaming
 
-Files stored beside the demo, not part of its bytes (an analysis result,
-a screenshot, notes, a recording). mvdz never interprets their content:
-an attachment is a name, a MIME type, free-form key/values (§10.1) and
-bytes.
-
-```
-ATTACH body := the stored bytes of one attachment
-ADIR body   := count uv | count x entry                       (consumed exactly)
-entry := nlen uv | name[nlen]   UTF-8, non-empty, unique in the file
-         mlen uv | mime[mlen]   UTF-8, a MIME type (may be empty)
-         codec u8               0 store, 1 zstd
-         size uv                original length
-         stored uv              ATTACH body length (must equal the section's)
-         sha256 [32]            of the original bytes
-         off u64le              file offset of the ATTACH section
-         nkv uv | nkv x { klen uv, key[klen], vlen uv, value[vlen] }   keys and values UTF-8, keys unique
-```
-
-Uniqueness is bytewise. The entries are in the order of the ATTACH
-sections. (A reader may refuse `count > len / 46` and `nkv > len / 2`, with
-`len` the ADIR body length, before allocating: no valid directory exceeds
-them, as an entry takes at least 46 bytes and a key/value pair 2.) A reader lists
-attachments from the ADIR and reads one by seeking to its `off`, without
-touching the demo or the other attachments. Reading one checks: codec 0,
-`size == stored`; codec 1, `size <= 1024 x stored + 4096` and zstd data of
-`size` bytes; then the SHA-256. An unknown codec makes that attachment
-unreadable (a format error when it is read), not the file. Readers do not
-read attachment bodies to skip them.
-
-**Writing.** The reference stores data as zstd (level 19) when that saves
-at least 1/16 of it and keeps within the ratio limit, else stored; so
-already-compressed media (Opus, PNG) is stored as is. Data that zstd level 1
-does not shrink by more than 1/32 is stored without trying level 19 (§12,
-rule 10).
-
-**Updating.** Adding, replacing or removing attachments rewrites only the
-part after `body_end`: the new file is `file[0 .. body_end]`, one ATTACH
-section per attachment, the ADIR (if any attachment remains) and a trailer
-with the same `index_off`, `meta_off`, `body_end` and the new `adir_off`.
-The demo part and its offsets are unchanged, unknown sections in it
-included; removing every attachment restores the original file byte for
-byte. The attachment part is rebuilt from the directory: unknown
-non-critical sections in it are dropped (they may depend on the
-attachment set, as a signature over the bundle would), and the directory
-is re-encoded (minimal varints). An update that changes nothing (no
-attachment added, none of the names to remove present) leaves the file as
-it is. An updater must not write a file
-that readers refuse: the reference refuses an update (and leaves the file
-alone) whose directory would exceed 2^24 bytes (checked before any
-attachment is packed, with every new entry's sizes counted at their
-largest encoding, so an update within about 20 bytes per new attachment
-of the limit may be refused), or whose new attachments use an unprefixed
-key (§10.1). The
-reference (`api.rs:update_attachments`) takes an advisory lock on the file
-(so concurrent updaters, threads or processes, serialise; on POSIX
-systems), writes the new file to a fresh temporary file in the same
-directory (created exclusively, so it never follows or reuses an existing
-path, and owner-only until it has the original's permissions and group,
-which it gets before any data is written), syncs it, renames it over the
-original and syncs the directory; a symlink is followed to the file it
-names. Readers that have the old file open keep a consistent view
-(POSIX).
-
-**Exporting** is the same operation as updating with only removals,
-written to a new file or stream instead of in place: `file[0 ..
-body_end]` byte for byte, the kept ATTACH sections exactly as stored (no
-recoding), a new ADIR with the kept entries in their original order and
-new offsets, and a trailer as above (unknown sections in the attachment
-part are dropped, as in an update, unless every attachment is kept); the
-source is not changed. Keeping
-every attachment copies the file as it is, byte for byte; keeping none
-gives the file without attachments, byte for byte. A typical export is a demo download without
-large attachments. The reference selects by name: an attachment is kept
-if its name is one of the `keep` names or starts with one of the
-`keep_prefix` prefixes (every attachment, if neither is given), and is
-none of the `drop` names and starts with none of the `drop_prefix`
-prefixes (`api.rs:Selection`, `export_attachments`, C
-`mvdz_attachments_export`, CLI `mvdz attach export [--keep name]...
-[--keep-prefix p]... [--drop name]... [--drop-prefix p]...`). Each
-returns or prints the bundle hash of the output (§10.2).
-
-### 10.1 Keys
-
-Each entry carries free-form key/value pairs (UTF-8). Version 1 defines
-no key. **Keys without a prefix are reserved** for future versions of
-this specification; everyone else writes keys that start with `x-` or
-with a vendor prefix, a name followed by a dot (`mvda.schema`,
-`ezquake.offset`). Writers refuse an unprefixed key (the reference does);
-readers accept and preserve every key, prefixed or not, exactly as
-stored, and ignore keys they do not know. Uniqueness of keys within an
-entry is bytewise. A future version can then define keys of its own
-(see `proposals/media-attachments.md` for media keys proposed for
-version 2) without colliding with keys already in files.
-
-### 10.2 Bundle hash (`api.rs:bundle_hash`)
-
-A SHA-256 that names the demo together with its attachments, the same
-whatever the level, the segmenting, the attachments' codecs and the order
-of the sections, so two files that carry the same demo and the same
-attachments have the same bundle hash. It is meant as a download ETag and
-as the message a future signature would sign. It is computed, not stored:
-
-```
-bundle_sha256 = SHA-256( "MVDZBND1"                         8 ASCII bytes
-                         | sha256 [32]                      META tag 1
-                         | count uv                         attachments in the ADIR (0 without one)
-                         | count x attachment )             in ascending bytewise order of name
-attachment := nlen uv | name | mlen uv | mime | sha256 [32]
-              | nkv uv | nkv x { klen uv | key | vlen uv | value }   in ascending bytewise order of key
-```
-
-Strings are the bytes stored in the ADIR (UTF-8), `uv` as in §1 (minimal
-encoding). It covers what the file *claims*: the META identity and the
-directory's SHA-256s. Verifying it means a full decode (the identity) and
-reading every attachment (their SHA-256s); a signature over it is only as
-good as those checks (§14). The demo's own metadata (server info, census,
-extension keys) is not covered separately: META is part of the demo part,
-which no operation of this format rewrites. The extension keys (tag 10)
-are fixed when the demo is compressed; changing them means rewriting META
-and with it the offsets of the demo part (the prefix, the INDEX and the
-trailer), and v1 has no tool for that. Data about a demo that changes
-over time (ratings, tags, links) belongs outside the file.
-
----------------------------------------------------------------------------
-
-## 11. Streaming
-
-### 11.1 Writing (`stream.rs:StreamEncoder`, API `Writer`, C `mvdz_writer_*`)
+### 10.1 Writing (`stream.rs:StreamEncoder`, API `Writer`, C `mvdz_writer_*`)
 
 The streaming encoder compresses a demo that is still being recorded:
 
@@ -1987,19 +1834,19 @@ The streaming encoder compresses a demo that is still being recorded:
 A reader finds the metadata of a streamed file through the trailer
 (`prefix.meta_off = 0`).
 
-### 11.2 Reading sequentially (`stream.rs:Reader::new`)
+### 10.2 Reading sequentially (`stream.rs:Reader::new`)
 
 A sequential reader processes sections in file order, applying §9 as they
-arrive: it keeps META, INDEX, ADIR and TABLES (bounded sizes), decodes
+arrive: it keeps META, INDEX and TABLES (bounded sizes), decodes
 each SEGMENT and delivers its bytes once the segment's own checks pass, skips
-ATTACH and unknown sections without buffering them, and at the TRAILER
+unknown sections without buffering them, and at the TRAILER
 runs the cross-checks of §9 and the whole-demo checks of §5.5 before
 reporting the end. A stream that ends without its trailer yields its
 complete segments, then an error. Errors are sticky.
 
 ---------------------------------------------------------------------------
 
-## 12. Encoder rules
+## 11. Encoder rules
 
 These are what the reference encoder does; a decoder does not depend on
 them, but the test vectors are reproduced byte for byte only by an encoder
@@ -2040,18 +1887,15 @@ of rule 10).
    and keeps within the ratio limit. Tag 11 reads the 0x000B block as §3
    says (both forms).
 8. **Writer limits**: a writer never writes a file a reader refuses. The
-   reference checks the extension metadata before any work, writes at most
+   reference checks the extension metadata before any work and writes at most
    65536 segments (so the INDEX stays far below 2^24 bytes; asking for a
    smaller segment size than that allows is an error, before any work in
-   the one-shot encoder), and refuses an attachment update whose directory
-   would exceed 2^24 bytes.
+   the one-shot encoder).
 9. **Determinism**: the output depends only on the input, the level, the
    segment size and the extension metadata: not on the thread count.
 10. **zstd levels** (`segment.rs:ZSTD_*`): every zstd stream, untransformed
     segment and META is compressed at level 17 at the normal level and 6
-    at the fast level. An attachment is first compressed at level 1; if
-    that does not save more than 1/32 of it, it is stored; otherwise it is
-    compressed at level 19 and the §10 rule applies. A decoder does not
+    at the fast level. A decoder does not
     depend on any of this: every zstd level reads the same.
 11. **Shared models** (`segment.rs:train`): in a one-shot file of more
     than one segment at the normal level, each structural and numeric
@@ -2064,7 +1908,7 @@ of rule 10).
 
 ---------------------------------------------------------------------------
 
-## 13. Notes for implementers
+## 12. Notes for implementers
 
 1. **Order of the walker and numeric groups.** The reference walks, then
    runs each wave-1 group, then snd.o and te.o. Wave 1 may also run
@@ -2147,12 +1991,12 @@ of rule 10).
     first segment that uses them is decoded, and hand the same read-only
     model to every segment's decoder (the reference shares them between
     threads). Their memory counts once against a budget, not per segment.
-    Opening a file only checks the section (§9 rule 8), so a hostile
+    Opening a file only checks the section (§9 rule 7), so a hostile
     TABLES costs a metadata reader no model memory.
 
 ---------------------------------------------------------------------------
 
-## 14. Security considerations
+## 13. Security considerations
 
 **Forged identity.** The SHA-256 in META (tag 1) is a claim until a full
 decode has recomputed it. Anyone can build a valid file whose META names
@@ -2162,18 +2006,16 @@ listing) must not treat the hash as proof of the content, and a cache
 keyed by it must verify it once, by a full decode, before trusting it.
 The *trusted* decoding option (reference `ReadOptions::trusted`, C
 `MVDZ_TRUSTED`, CLI `--trusted`) skips that recomputation and is for
-exactly such a cache, never for files from elsewhere. The bundle hash
-(§10.2) inherits the same caveat for the attachments' SHA-256s. A
-signature scheme must sign the bundle hash only after verifying it.
+exactly such a cache, never for files from elsewhere.
 
 **Hostile input.** Every size a file declares is bounded by its bytes
 (§9, Limits) and a decoder applies its own budget on top, so a small file
 cannot make a conforming decoder allocate or work without bound; a
 decoder must fail with an error, never abort, hang or touch memory out of
-bounds. Duplicate checks and directory parsing must be close to linear;
+bounds. Duplicate checks must be close to linear;
 zstd bodies must be checked against the window rule (§1) before a
-streaming zstd decoder buffers them; transient structures (model tables,
-parsed directories) count against the budget. The reference is fuzzed on
+streaming zstd decoder buffers them; transient structures (model tables)
+count against the budget. The reference is fuzzed on
 all its readers and its C interface. The C interface takes no pointers
 from files; handles are ids.
 
@@ -2187,24 +2029,13 @@ and FTE restrict stufftext from demos); tools that display metadata
 (server info, names, the census) must escape it (the reference renders it
 as JSON, and the CLI escapes what it prints as text).
 
-**Attachments.** Attachments are untrusted content of any type: the MIME
-type is a claim, not a check. Readers must not use names as file paths
-(a name may contain `/`, `..` or control characters; the reference never
-does), must cap the size they accept (an attachment may be large; its
-`size` is known from the directory before it is read), and should open
-media in a sandbox or with hardened decoders. Attachments are not
-access-controlled: anyone holding a file can list and read all of them,
-so check a file's attachments (`mvdz attach ls`) before sharing it, and
-export a copy without the ones that must not travel (§10, Exporting).
-
 **Bit rot.** CRC-32C detects every burst error of up to 32 bits and all
 but about 1 in 2^32 random corruptions per segment, and a second CRC
 covers the whole demo; a full decode also checks sizes, timing and,
 unless trusted, the SHA-256. Corruption is therefore detected, not
 repaired: there is no redundancy to correct it, and the segment it hits
 is lost (other segments still decode by seeking). The CRCs protect the
-decoded demo, not the attachments (their SHA-256 does) nor the metadata
-beyond the META CRC. Neither CRC nor SHA-256 detects a file that was
+decoded demo, not the metadata beyond the META CRC. Neither CRC nor SHA-256 detects a file that was
 replaced as a whole by another valid file; only a hash or signature kept
 elsewhere does. Keep a second copy of an archive.
 

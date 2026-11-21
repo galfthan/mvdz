@@ -96,26 +96,12 @@ int main(int argc, char **argv) {
     if (mvdz_read(r, back, 10) != MVDZ_E_INVALID) { fprintf(stderr, "closed handle accepted\n"); return 1; }
     fclose(p);
 
-    /* 5. attachments */
-    const char *keys[] = {"x-recorded-by", "example.track"};
-    const char *vals[] = {"someone", "1"};
-    mvdz_attachment a = {"voice/someone.ogg", "audio/ogg; codecs=opus", keys, vals, 2, "OggS...", 7};
-    rc = mvdz_attachments_update(packed, NULL, 0, &a, 1);
-    if (rc) return fail("attachments_update", rc);
-    p = fopen(packed, "rb");
-    unsigned char *att; size_t att_n;
-    rc = mvdz_attachment_read(f_read, f_seek, p, "voice/someone.ogg", 0, &att, &att_n);
-    if (rc || att_n != 7 || memcmp(att, "OggS...", 7) != 0) return fail("attachment_read", rc);
-    mvdz_free(att, att_n);
-    fclose(p);
-    printf("attachment round trip ok\n");
-
-    /* 6. corrupt input never crashes */
+    /* 5. corrupt input never crashes */
     unsigned char junk[64] = "MVDZ\x01";
     r = mvdz_open_memory(junk, sizeof junk, 0, 0, &err);
     printf("garbage: %s\n", r ? "opened?!" : mvdz_strerror(err));
     if (r) mvdz_close(r);
-    /* 7. an aborted recording: no trailer, its segments still decode */
+    /* 6. an aborted recording: no trailer, its segments still decode */
     o = fopen(packed, "wb");
     w = mvdz_writer_open(f_write, o, MVDZ_LEVEL_FAST, 64 * 1024, &err);
     if (!w) return fail("writer_open", err);
@@ -126,7 +112,7 @@ int main(int argc, char **argv) {
     fclose(o);
     printf("aborted recording ok\n");
 
-    /* 8. whole-buffer API (.mvd or .mvd.gz input); input that is not a
+    /* 7. whole-buffer API (.mvd or .mvd.gz input); input that is not a
      * demo is refused */
     unsigned char *z; size_t z_n;
     rc = mvdz_compress(demo, (size_t)n, MVDZ_LEVEL_FAST, 0, 1, &z, &z_n);
